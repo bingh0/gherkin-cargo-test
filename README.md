@@ -1,0 +1,288 @@
+# gherkin-cargo-test
+
+**The smallest honest Gherkin runner for Rust.** Two boring dependencies, no
+proc macros, no async, no framework — it turns `.feature` files into real
+`cargo test` tests (one per scenario, via [libtest-mimic]), and it treats
+every silence as a bug. One file, ~900 lines, small enough to read in one
+sitting or to vendor outright.
+
+This is the Rust sibling of [gherkin-node-test] — same author, same grammar,
+same philosophy, ported guard-for-guard. The feature files are portable
+between the two: Gherkin is the language-neutral control layer.
+
+[libtest-mimic]: https://crates.io/crates/libtest-mimic
+[gherkin-node-test]: https://github.com/bingh0/gherkin-node-test
+
+```toml
+[dev-dependencies]
+gherkin-cargo-test = "0.1"
+
+[[test]]
+name = "features"
+harness = false
+```
+
+## Why another BDD tool
+
+There is an excellent full Cucumber implementation for Rust —
+[cucumber-rs](https://github.com/cucumber-rs/cucumber) — and if you want the
+full standard, tag expressions, and living-documentation output, use it.
+
+This crate exists for a different reason. It came out of an experiment in
+**agent-driven development with strict BDD**: a workflow where a human writes
+and owns the Gherkin feature files, and coding agents write essentially all of
+the implementation. In that workflow the feature files aren't documentation —
+they're the **control layer**. They're the one artifact the human actually
+reads, audits, and carries between implementations (including across
+*languages*: this crate parses its JS sibling's feature corpus unchanged).
+Everything underneath is regenerable.
+
+That inverts what matters in a test harness. When no human reads every line of
+the code, the harness is the only witness — and the failure mode that kills
+you is not a crash. It's a **false green**: a suite that says "all your
+acceptance criteria hold" when some of them were never checked. Crashes get
+fixed; silences compound.
+
+False greens have specific, boring causes. Each one is a design decision here:
+
+| How suites lie | What this runner does about it |
+|---|---|
+| The parser half-understands a construct and silently drops steps or table cells | Unsupported syntax is a **hard error with `file:line`** — doc strings, `Rule:`, ragged tables, a table row missing its closing `\|`, all of it. Never a best-effort parse. |
+| A scenario with zero bound steps "passes" | Unbound scenarios register as *ignored* — and ignored is *reported as green*, so the runner **fails the suite** on any unbound step unless the feature is explicitly marked `.wip()`. Rewording one step can't silently un-test a feature. |
+| A step matches two definitions and one silently wins | Ambiguity is **asserted against per feature**, as its own trial, for every step — even for `.wip()` features. |
+| Step definitions collide across the suite's global namespace | There is no global namespace: **each feature gets its own registry and its own typed `World`**. An agent editing one feature structurally cannot break another's bindings — the type system enforces it. |
+| A scaffolded step stub passes vacuously | Missing-step failures include a **paste-ready definition whose body panics** `pending`. You cannot paste your way to a false green. |
+| A failing assertion leaks the temp dir / process it was about to clean up | `ctx.defer(f)` runs cleanup LIFO **even when a step panics**. The step failure outranks cleanup errors. |
+| A typo'd `@skip` tag is silently inert | Misplaced tags, dangling tags, and near-miss tags (`@Skip`, `@ONLY`) are **loud errors**. `@only` itself is rejected loudly too — Rust has no `--test-only`; use `cargo test -- '<name>'`. |
+| A step matcher that falls through silently | Steps are matched by a **registry with an unbound-step ratchet** — never by inline `if text.contains(…)` chains, where an unmatched step is a silent no-op. |
+
+The same properties are exactly what a coding agent needs, because agents act
+on error output: a located `file:line` error, a failure message containing the
+snippet that fixes it, a ratchet that converts silent decay into a red test.
+And Rust adds its own layer — the compiler checks every step definition's
+types against the feature's `World` before anything runs.
+
+Because scenarios compile into `cargo test` trials, there is no second
+toolchain: one command runs unit tests and acceptance criteria together, with
+name filtering (`cargo test -- 'Counter'`) and CI integration inherited from
+Cargo itself. [cargo-nextest] works too.
+
+[cargo-nextest]: https://nexte.st
+
+## Quick start
+
+```
+features/
+  counter.feature
+tests/
+  features.rs
+```
+
+```gherkin
+# features/counter.feature
+Feature: Counter
+  Scenario: increment once
+    Given a counter at 0
+    When I add 5
+    Then the counter is 5
+```
+
+```rust
+// tests/features.rs      (harness = false in Cargo.toml, see above)
+use gherkin_cargo_test::{Features, StepRegistry};
+
+#[derive(Default)]
+struct Counter {
+    count: i64,
+}
+
+fn counter_steps(reg: &mut StepRegistry<Counter>) {
+    reg.define(r"^a counter at (\d+)$", |ctx, args, _| {
+        ctx.world.count = args[0].parse().unwrap();
+    });
+    reg.define(r"^I add (\d+)$", |ctx, args, _| {
+        ctx.world.count += args[0].parse::<i64>().unwrap();
+    });
+    reg.define(r"^the counter is (\d+)$", |ctx, args, _| {
+        assert_eq!(ctx.world.count, args[0].parse::<i64>().unwrap());
+    });
+}
+
+fn main() {
+    Features::new("features")
+        .feature("counter", counter_steps)   // feature basename → step definer
+        .run()
+}
+```
+
+```sh
+cargo test
+```
+
+Each scenario becomes one trial named `Feature :: Scenario`. A fresh `World`
+(`W::default()`) is created per scenario; `Background` steps run before each
+one. Alongside the scenarios, the runner registers the guard trials described
+above (ambiguity, unbound steps, orphaned definer keys).
+
+If a step is missing, the guard failure hands you the definition:
+
+```
+FAILED: counter :: step definitions are complete and unambiguous
+  unbound steps would register as ignored (reported green); bind them or mark 'counter' as .wip():
+
+  // I add 5
+  reg.define(r#"^I add (\d+)$"#, |ctx, args, table| {
+      panic!("pending: implement this step");
+  });
+```
+
+## Supported grammar
+
+| Construct | Notes |
+|---|---|
+| `Feature:` | exactly one per file, required |
+| `Background:` | optional, at most one, must precede every `Scenario` |
+| `Scenario:` | free-text title |
+| `Scenario Outline:` | requires exactly one `Examples:` table |
+| `Examples:` | a header row then ≥1 data row, `\|`-delimited |
+| `<placeholder>` | substituted from the Examples columns — in step text **and** step data tables; every `<name>` must match a column |
+| Steps | `Given` `When` `Then` `And` `But` `*`, followed by step text |
+| Step data tables | `\|` rows after a step attach to it; the step closure receives an **`Option<&DataTable>`** as its last argument |
+| Tags | `@skip` → trial ignored (steps must still bind); `@todo` → runs, failure tolerated; `@only` → **rejected loudly** (use `cargo test -- '<filter>'`); tags on `Feature:` apply to all its scenarios; any other tag is carried on `scenario.tags` with no runtime effect |
+| `# comment` | ignored anywhere |
+| Feature narrative | the `As a… / I want… / So that…` prose block is ignored |
+
+Table cells honor the Gherkin escapes `\|` (literal pipe), `\\` (literal
+backslash) and `\n` (newline); a backslash before any other character is
+literal, so cells like `C:\Temp` need no escaping.
+
+### Step matching and `DataTable`
+
+Steps are matched by **regex source string** (`define`) or **exact literal**
+(`define_exact`) — capture groups become the step's `args: &[String]`; parse
+them in the step. There are no Cucumber Expressions (`{int}`, `{string}`);
+write a regex.
+
+A step with a data table receives `Some(&DataTable)` as its last argument,
+API-compatible with cucumber so step code (and muscle memory) ports both ways:
+
+```gherkin
+Given these users
+  | name | role  |
+  | ada  | admin |
+```
+
+```rust
+reg.define_exact("these users", |ctx, _, table| {
+    let t = table.expect("step has a data table");
+    t.raw();       // Vec<Vec<String>>, every row
+    t.rows();      // rows minus the header
+    t.hashes();    // Vec<HashMap>: [{name: "ada", role: "admin"}]
+    t.rows_hash(); // two-column table → key → value map (panics otherwise)
+    t.transpose(); // columns become rows → new DataTable
+});
+```
+
+### Scenario-scoped cleanup: `ctx.defer(f)`
+
+Cleanup runs after the scenario in reverse (LIFO) order — **including when a
+step panicked**. The step failure, if any, outranks cleanup errors; if the
+steps passed, the first cleanup error fails the scenario.
+
+```rust
+reg.define_exact("a scratch dir", |ctx, _, _| {
+    let dir = mkdtemp();
+    ctx.world.dir = Some(dir.clone());
+    ctx.defer(move |_| { let _ = std::fs::remove_dir_all(&dir); });
+});
+```
+
+## Deliberately unsupported — and rejected loudly
+
+The design rule: **parse the supported subset correctly; reject everything
+else with a `file:line` error; never parse a feature file vacuously.** Each of
+these is a `GherkinSyntaxError` with the offending line number:
+
+| Rejected | Why it's rejected, not ignored |
+|---|---|
+| Doc strings (`"""` / ` ``` `) | would be mis-read line-by-line as steps |
+| Multiple `Examples:` per Outline | the 2nd header row would corrupt the expansion |
+| `Examples:` with no data rows / no header | would expand to zero (vacuous) scenarios |
+| Ragged table rows (Examples **or** step tables) | column misalignment would pass silently |
+| A table row missing its closing `\|` | the trailing cell would be silently dropped |
+| A table row with no preceding step | the data would silently belong to nothing |
+| Unknown `<placeholder>` | almost always a typo; would leak `<name>` into a step |
+| A `Scenario`/`Scenario Outline` with no steps | would run zero assertions and pass vacuously |
+| A step *after* its `Examples:` table | malformed ordering; the step would mis-attach |
+| Tags anywhere but immediately before `Feature:` / `Scenario:` / `Scenario Outline:` | a mis-placed `@skip` would silently not skip |
+| A near-miss semantic tag (`@Skip`, `@SKIP`, `@Only`, …) | would be silently inert |
+| `Rule:` (Gherkin 6) | grouping would be silently flattened |
+| A step before any `Scenario`/`Background` | would be silently discarded |
+| A 2nd `Feature:` / `Background:`, or `Background:` after a `Scenario` | ambiguous scope |
+
+Two non-features by design, with no dedicated error: **Cucumber Expressions**
+(write a regex) and **i18n** (English keywords only — a non-English keyword
+reads as narrative; if that empties a scenario, the no-steps guard fires, so
+it still can't pass vacuously).
+
+## Deviations from gherkin-node-test
+
+Same grammar, same guards; the differences are where Rust is genuinely
+different, and each one is deliberate:
+
+| Node | Rust | Why |
+|---|---|---|
+| dynamic `world` object | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the compiler now catches world-shape mistakes the JS version can't |
+| `@only` under `node --test --test-only` | **rejected loudly** | `cargo test` has no `--test-only`; a silently inert `@only` is the worst tag failure mode. Use `cargo test -- '<name>'` |
+| `@todo` → node:test `todo` | runs; failure printed and **tolerated** (trial kind `todo`) | libtest has no todo concept; this preserves "runs but doesn't gate" |
+| unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) | same visibility, same ratchet: the binding guard fails the suite unless `.wip()` |
+| zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
+| throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
+
+## When *not* to use this
+
+- You want the full Gherkin standard, tag-expression filtering, i18n, or
+  living-documentation reports → **cucumber-rs**. That's a platform; this is a
+  file.
+- You need async step functions → **cucumber-rs** (steps here are sync
+  closures; blocking IO in tests is fine).
+- You only need a Gherkin *parser* → the **`gherkin`** crate.
+
+The niche here is exactly: Gherkin on `cargo test`, minimal and macro-free,
+loud by construction.
+
+## API
+
+| Export | Purpose |
+|---|---|
+| `Features::new(dir).feature(base, definer).wip(base).run()` | **high-level runner**: discover every `.feature`, scoped registries, typed worlds, guard trials |
+| `Features::build_trials()` | the same trials without running them (the guards are testable — see `tests/guards-proof.rs`) |
+| `parse_feature(text, filename)` | parse → `ParsedFeature`; `Err(GherkinSyntaxError)` on unsupported/malformed syntax |
+| `StepRegistry<W>` | `.define(regex_src, fn)` / `.define_exact(text, fn)` / `.find(text)` / `.matching(text)` |
+| `execute_steps(steps, &registry, world)` | run a flat step list against a world (LIFO `defer` cleanup included) |
+| `check_bindings(&parsed, &registry, base, wip)` | the pure binding guard (ambiguity + unbound-step ratchet) |
+| `Ctx<W>` | step context: `.world` + `.defer(f)` |
+| `DataTable` | cucumber-compatible step table: `raw` / `rows` / `hashes` / `rows_hash` / `transpose` |
+| `build_snippet(text)` | paste-ready step definition for an unbound step (body panics) |
+| `GherkinSyntaxError` | parse error; carries `.line`, displays as `file:line: message` |
+
+There is also a corpus checker for evaluating an existing feature suite
+against this grammar before porting a project:
+
+```sh
+cargo run --example parse -- path/to/features/*.feature
+```
+
+## Provenance
+
+Ported guard-for-guard from [gherkin-node-test], which was extracted from
+[ccr](https://github.com/bingh0/ccr) where it runs the acceptance layer of a
+shipping CLI. The port was validated three ways: a conformance suite with a
+rejection test for every guard above (`tests/conformance.rs`); an executed
+proof that every runner guard actually *fires* — trials are built over fixture
+features and run through libtest-mimic in-process, asserting pass/fail/ignored
+counts (`tests/guards-proof.rs`); and a real-world corpus check — the feature
+suites of two shipping projects written for the JS sibling and for
+vitest-cucumber (102 files, 507 scenarios) parse with zero rejections.
+
+MIT © Bing Ho

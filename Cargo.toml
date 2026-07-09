@@ -1,0 +1,25 @@
+[package]
+name = "gherkin-cargo-test"
+version = "0.1.0"
+edition = "2021"
+description = "The smallest honest Gherkin runner for Rust — two boring dependencies, on cargo test via libtest-mimic, built for agent-driven BDD."
+license = "MIT"
+authors = ["Bing Ho <reps-attic-riot@duck.com>"]
+repository = "https://github.com/bingh0/gherkin-cargo-test"
+keywords = ["gherkin", "bdd", "cucumber", "acceptance-testing", "agent"]
+categories = ["development-tools::testing"]
+
+[dependencies]
+regex = "1"
+libtest-mimic = "0.8"
+
+# The crate's own acceptance layer: real .feature files run through the runner.
+[[test]]
+name = "features"
+harness = false
+
+# Executed proof of every runner guard: builds trials from fixture feature
+# dirs, runs them through libtest-mimic in-process, asserts the Conclusion.
+[[test]]
+name = "guards-proof"
+harness = false
