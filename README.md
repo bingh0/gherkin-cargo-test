@@ -183,6 +183,44 @@ experiment simply stay unbound under a `.wip()` feature — visible as ignored,
 never silently green, and demanded by the guard the moment the marker comes
 off.
 
+## N-version verification
+
+Because the feature files are language-neutral and strictly separated from
+step code, they support a workflow that used to be priced out of reach:
+**independent implementations of the same spec, diffed against each other.**
+Classic N-version programming meant paying two teams; with coding agents, a
+second implementation of a pure kernel costs one prompt. The features are
+the shared contract — this crate and its JS sibling
+[gherkin-node-test](https://github.com/bingh0/gherkin-node-test) parse the
+same dialect, so one `.feature` suite can drive both implementations
+**verbatim**.
+
+The mechanics, beyond running the same scenarios against both:
+
+1. Drive both implementations with **identical generated inputs** — a
+   deterministic PRNG implementable bit-for-bit in both languages (e.g.
+   mulberry32: `wrapping_mul`/`^`/`>>` here ≡ `Math.imul`/`^`/`>>>` in JS),
+   so both sides see the same doubles in the same order.
+2. Compare a **checksum over every output** (not just pass/fail). Agreement
+   to full float precision is the strongest correctness evidence available
+   to someone who cannot read the code; disagreement localizes a bug to one
+   side before any user ever sees it.
+3. A behavioral divergence that **no scenario catches** is a spec gap with
+   two witnesses — feed it back into the feature file.
+
+When it's worth it: pure, deterministic kernels — parsers, numeric and
+financial code, codecs, business rules — where subtle bugs (boundary
+conditions, float behavior) would otherwise be silent; any port, where the
+old implementation verifies the new one for free; anywhere the human
+auditing the system reads only the features. When it isn't: I/O-heavy glue
+and UI code, whose behavior *is* the environment rather than a function of
+its inputs.
+
+Proven in practice: a TypeScript signal-processing kernel and its
+agent-written Rust port, bound to md5-identical feature files, matched to
+six decimal places over thousands of PRNG-generated inputs — on the first
+comparison.
+
 ## Supported grammar
 
 | Construct | Notes |
