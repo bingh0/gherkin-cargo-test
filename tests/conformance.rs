@@ -522,6 +522,56 @@ fn table_arrives_as_the_last_argument() {
 }
 
 #[test]
+fn background_steps_carry_data_tables() {
+    // The table-row arm for Cur::Background — a Background step's data table
+    // must attach to it and reach the step function at execution time.
+    let src = "Feature: f\nBackground:\n  Given base config\n    | retries | 3 |\nScenario: s\n  Then retries is 3\n";
+    let p = parse_feature(src, "f.feature").expect("parses");
+    assert_eq!(
+        p.background[0].table.as_ref().expect("background table")[0],
+        vec!["retries", "3"]
+    );
+
+    #[derive(Default)]
+    struct W {
+        retries: String,
+    }
+    let mut reg: StepRegistry<W> = StepRegistry::new();
+    reg.define_exact("base config", |ctx, _, table| {
+        ctx.world.retries = table.expect("table").rows_hash()["retries"].clone();
+    });
+    reg.define(r"^retries is (\d+)$", |ctx, args, _| {
+        assert_eq!(ctx.world.retries, args[0]);
+    });
+    let steps: Vec<Step> = p
+        .background
+        .iter()
+        .chain(p.scenarios[0].steps.iter())
+        .cloned()
+        .collect();
+    execute_steps(&steps, &reg, W::default()).expect("passes");
+}
+
+#[test]
+fn failure_message_carries_string_panic_payloads() {
+    // assert!/assert_eq! failures panic with a String payload, not &str.
+    let mut reg: StepRegistry<()> = StepRegistry::new();
+    reg.define_exact("it breaks formatted", |_, _, _| panic!("code {}", 7));
+    let steps = steps_of("Feature: f\nScenario: s\n  Given it breaks formatted\n");
+    let e = execute_steps(&steps, &reg, ()).expect_err("must fail");
+    assert!(e.contains("code 7"), "got: {e}");
+}
+
+#[test]
+fn non_string_panic_payloads_are_still_reported() {
+    let mut reg: StepRegistry<()> = StepRegistry::new();
+    reg.define_exact("it panics oddly", |_, _, _| std::panic::panic_any(42_i32));
+    let steps = steps_of("Feature: f\nScenario: s\n  Given it panics oddly\n");
+    let e = execute_steps(&steps, &reg, ()).expect_err("must fail");
+    assert!(e.contains("non-string panic payload"), "got: {e}");
+}
+
+#[test]
 fn defer_runs_lifo_after_passing_steps() {
     #[derive(Default)]
     struct W {

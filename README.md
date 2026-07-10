@@ -3,7 +3,7 @@
 **The smallest honest Gherkin runner for Rust.** Two boring dependencies, no
 proc macros, no async, no framework — it turns `.feature` files into real
 `cargo test` tests (one per scenario, via [libtest-mimic]), and it treats
-every silence as a bug. One file, ~900 lines, small enough to read in one
+every silence as a bug. One file, ~1,100 lines, small enough to read in one
 sitting or to vendor outright.
 
 This is the Rust sibling of [gherkin-node-test] — same author, same grammar,
@@ -15,7 +15,8 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.1"
+gherkin-cargo-test = { git = "https://github.com/bingh0/gherkin-cargo-test" }
+# (crates.io release planned — or just vendor src/lib.rs; it's one file)
 
 [[test]]
 name = "features"
@@ -309,7 +310,7 @@ loud by construction.
 | `check_bindings(&parsed, &registry, base, wip)` | the pure binding guard (ambiguity + unbound-step ratchet) |
 | `Ctx<W>` | step context: `.world` + `.defer(f)` |
 | `DataTable` | cucumber-compatible step table: `raw` / `rows` / `hashes` / `rows_hash` / `transpose` |
-| `build_snippet(text)` | paste-ready step definition for an unbound step (body panics) |
+| `build_snippet(text)` | paste-ready step definition for an unbound step (body panics). One known edge: step text containing `"#` would break the emitted `r#"…"#` literal — write that regex by hand |
 | `GherkinSyntaxError` | parse error; carries `.line`, displays as `file:line: message` |
 
 There is also a corpus checker for evaluating an existing feature suite

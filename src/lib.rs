@@ -1,60 +1,62 @@
-// gherkin-cargo-test
-// A tiny, honest Gherkin runner on top of `cargo test`, via libtest-mimic.
-//
-// This is the Rust sibling of gherkin-node-test (same author, same philosophy,
-// same grammar). It parses the practical core of Gherkin — Feature / Background /
-// Scenario / Scenario Outline + Examples, with Given·When·Then·And·But·* steps,
-// step-level data tables, and @skip/@todo tags — and turns each scenario into a
-// libtest-mimic Trial run under `cargo test`. Scenario Outlines are expanded
-// once per Examples row.
-//
-// The high-level entry point is the `Features` builder: it discovers every
-// *.feature in a directory, runs each against its OWN scoped registry with its
-// OWN typed World (step patterns and world state never leak between features),
-// and registers guard trials that fail on ambiguous steps, on unbound steps
-// (which would otherwise register as ignored — reported GREEN by the runner),
-// and on definer keys that match no feature file. A feature still being
-// bootstrapped opts out of the unbound-step ratchet by name via `.wip(base)`.
-//
-// SUPPORTED grammar (the practical core, guarded loudly):
-//   Feature:            one per file, required
-//   Background:         optional, at most one, before any Scenario
-//   Scenario:           free text title
-//   Scenario Outline:   + exactly one Examples: table; <placeholder> substitution
-//   Examples:           a leading header row then >=1 data row, pipe-delimited
-//   Steps:              Given | When | Then | And | But | *   followed by text
-//   Step data tables:   | rows after a step attach to it; the step closure
-//                       receives a cucumber-compatible DataTable as its last
-//                       argument (raw/rows/hashes/rows_hash/transpose). Cells
-//                       honor \| \\ \n escapes; other backslashes are literal.
-//   Tags:               @skip marks the trial ignored (steps must still BIND —
-//                       skip means "don't run", never "don't bind"); @todo runs
-//                       the scenario but a failure doesn't gate the suite; tags
-//                       on Feature: apply to all its scenarios; all other tags
-//                       (e.g. @AC3) are carried but have no effect. @only is
-//                       REJECTED loudly — use `cargo test <name filter>`.
-//   Comments (# ...) and the Feature narrative are ignored.
-//
-// DELIBERATELY NOT SUPPORTED. Structural misuse is REJECTED LOUDLY — each
-// returns a GherkinSyntaxError with file:line, so a feature file can't pass
-// *vacuously* by being silently mis-parsed:
-//   - doc strings (""" or ```)            - the Rule: keyword (Gherkin 6)
-//   - multiple Examples per Outline       - a step after its Examples table
-//   - a Scenario/Outline with no steps    - a table row with no preceding step
-//   - ragged table rows                   - a table row missing its closing |
-//   - tags anywhere but immediately before Feature:/Scenario:/Scenario Outline:
-// Two non-features are NOT special-cased, by design (no dedicated error):
-//   - Cucumber Expressions ({int}, …): step text is matched by regex via
-//     StepRegistry — write a regex; there is no {int} expansion.
-//   - i18n: English keywords only. A non-English keyword line is treated as
-//     narrative and ignored; if that leaves a scenario empty the no-steps guard
-//     fires, so it still can't pass vacuously.
-// If you need the real thing, reach for the `gherkin` crate or cucumber-rs.
-// See README.md for the full grammar and rationale.
-//
-// Two boring dependencies — `regex` (step matching) and `libtest-mimic`
-// (per-scenario Trials under `cargo test`). Zero-dependency is a non-goal here:
-// hand-rolling a regex engine or a test protocol would be its own foot-gun.
+//! gherkin-cargo-test
+//! A tiny, honest Gherkin runner on top of `cargo test`, via libtest-mimic.
+//!
+//! This is the Rust sibling of gherkin-node-test (same author, same philosophy,
+//! same grammar). It parses the practical core of Gherkin — Feature / Background /
+//! Scenario / Scenario Outline + Examples, with Given·When·Then·And·But·* steps,
+//! step-level data tables, and @skip/@todo tags — and turns each scenario into a
+//! libtest-mimic Trial run under `cargo test`. Scenario Outlines are expanded
+//! once per Examples row.
+//!
+//! The high-level entry point is the `Features` builder: it discovers every
+//! *.feature in a directory, runs each against its OWN scoped registry with its
+//! OWN typed World (step patterns and world state never leak between features),
+//! and registers guard trials that fail on ambiguous steps, on unbound steps
+//! (which would otherwise register as ignored — reported GREEN by the runner),
+//! and on definer keys that match no feature file. A feature still being
+//! bootstrapped opts out of the unbound-step ratchet by name via `.wip(base)`.
+//!
+//! SUPPORTED grammar (the practical core, guarded loudly):
+//!   Feature:            one per file, required
+//!   Background:         optional, at most one, before any Scenario
+//!   Scenario:           free text title
+//!   Scenario Outline:   + exactly one Examples: table; <placeholder> substitution
+//!   Examples:           a leading header row then >=1 data row, pipe-delimited
+//!   Steps:              Given | When | Then | And | But | *   followed by text
+//!   Step data tables:   | rows after a step attach to it; the step closure
+//!                       receives a cucumber-compatible DataTable as its last
+//!                       argument (raw/rows/hashes/rows_hash/transpose). Cells
+//!                       honor \| \\ \n escapes; other backslashes are literal.
+//!   Tags:               @skip marks the trial ignored (steps must still BIND —
+//!                       skip means "don't run", never "don't bind"); @todo runs
+//!                       the scenario but a failure doesn't gate the suite; tags
+//!                       on Feature: apply to all its scenarios; all other tags
+//!                       (e.g. @AC3) are carried but have no effect. @only is
+//!                       REJECTED loudly — use `cargo test <name filter>`.
+//!   Comments (# ...) and the Feature narrative are ignored.
+//!
+//! DELIBERATELY NOT SUPPORTED. Structural misuse is REJECTED LOUDLY — each
+//! returns a GherkinSyntaxError with file:line, so a feature file can't pass
+//! *vacuously* by being silently mis-parsed:
+//!   - doc strings (""" or ```)            - the Rule: keyword (Gherkin 6)
+//!   - multiple Examples per Outline       - a step after its Examples table
+//!   - a Scenario/Outline with no steps    - a table row with no preceding step
+//!   - ragged table rows                   - a table row missing its closing |
+//!   - tags anywhere but immediately before Feature:/Scenario:/Scenario Outline:
+//!
+//! Two non-features are NOT special-cased, by design (no dedicated error):
+//!   - Cucumber Expressions ({int}, …): step text is matched by regex via
+//!     StepRegistry — write a regex; there is no {int} expansion.
+//!   - i18n: English keywords only. A non-English keyword line is treated as
+//!     narrative and ignored; if that leaves a scenario empty the no-steps guard
+//!     fires, so it still can't pass vacuously.
+//!
+//! If you need the real thing, reach for the `gherkin` crate or cucumber-rs.
+//! See README.md for the full grammar and rationale.
+//!
+//! Two boring dependencies — `regex` (step matching) and `libtest-mimic`
+//! (per-scenario Trials under `cargo test`). Zero-dependency is a non-goal here:
+//! hand-rolling a regex engine or a test protocol would be its own foot-gun.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -718,10 +720,6 @@ impl<W> StepRegistry<W> {
             .filter(|(_, (re, _))| re.is_match(text))
             .map(|(i, _)| i)
             .collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
     }
 }
 

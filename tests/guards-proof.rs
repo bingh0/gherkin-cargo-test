@@ -38,21 +38,30 @@ fn run(f: Features) -> Conclusion {
 
 static DEFER_RAN: AtomicBool = AtomicBool::new(false);
 
+fn check(
+    failures: &mut Vec<String>,
+    name: &str,
+    c: Conclusion,
+    passed: u64,
+    failed: u64,
+    ignored: u64,
+) {
+    let got = (c.num_passed, c.num_failed, c.num_ignored);
+    if got == (passed, failed, ignored) {
+        println!("guard-proof: {name} ok {got:?}");
+    } else {
+        failures.push(format!(
+            "{name}: expected (passed, failed, ignored) = ({passed}, {failed}, {ignored}), got {got:?}"
+        ));
+    }
+}
+
 fn main() {
     let mut failures: Vec<String> = Vec::new();
-    let mut check = |name: &str, c: Conclusion, passed: u64, failed: u64, ignored: u64| {
-        let got = (c.num_passed, c.num_failed, c.num_ignored);
-        if got == (passed, failed, ignored) {
-            println!("guard-proof: {name} ok {got:?}");
-        } else {
-            failures.push(format!(
-                "{name}: expected (passed, failed, ignored) = ({passed}, {failed}, {ignored}), got {got:?}"
-            ));
-        }
-    };
 
     // A fully bound feature: everything green, nothing ignored.
     check(
+        &mut failures,
         "good",
         run(Features::new("tests/fixtures/good").feature("counter", value_steps)),
         3, // orphan guard + binding guard + 1 scenario
@@ -63,6 +72,7 @@ fn main() {
     // An unbound step: the binding guard FAILS (with a paste-ready snippet)
     // and the unbound scenario registers as ignored — never silently green.
     check(
+        &mut failures,
         "unbound",
         run(Features::new("tests/fixtures/unbound").feature(
             "pipeline",
@@ -77,6 +87,7 @@ fn main() {
 
     // The same feature marked .wip(): the ratchet is relaxed, guard passes.
     check(
+        &mut failures,
         "unbound-wip",
         run(Features::new("tests/fixtures/unbound")
             .feature("pipeline", |reg: &mut StepRegistry<World>| {
@@ -96,6 +107,7 @@ fn main() {
         reg.define(r"doubly matched", |_, _, _| {});
     };
     check(
+        &mut failures,
         "ambiguous",
         run(Features::new("tests/fixtures/ambiguous").feature("amb", ambiguous_defs)),
         2, // orphan guard + scenario
@@ -103,6 +115,7 @@ fn main() {
         0,
     );
     check(
+        &mut failures,
         "ambiguous-even-when-wip",
         run(Features::new("tests/fixtures/ambiguous")
             .feature("amb", ambiguous_defs)
@@ -114,6 +127,7 @@ fn main() {
 
     // A definer whose feature file does not exist: the orphan guard fails.
     check(
+        &mut failures,
         "orphan",
         run(Features::new("tests/fixtures/orphan")
             .feature("real", value_steps)
@@ -125,6 +139,7 @@ fn main() {
 
     // A feature file with NO definer at all: same ratchet as unbound steps.
     check(
+        &mut failures,
         "no-definer",
         run(Features::new("tests/fixtures/good")),
         1, // orphan guard
@@ -135,6 +150,7 @@ fn main() {
     // @skip: the scenario is ignored and its panicking step never runs
     // (a run would surface as a failure here).
     check(
+        &mut failures,
         "skip",
         run(Features::new("tests/fixtures/skip").feature(
             "skip",
@@ -152,6 +168,7 @@ fn main() {
     // @todo: the scenario runs and fails, but the failure does not gate the
     // suite; the sibling non-todo scenario still gates normally.
     check(
+        &mut failures,
         "todo",
         run(Features::new("tests/fixtures/todo").feature(
             "todo",
@@ -170,6 +187,7 @@ fn main() {
     // @only: rejected loudly — there is no `--test-only` analog, so silence
     // would be the worst outcome. The scenario itself still runs.
     check(
+        &mut failures,
         "only",
         run(Features::new("tests/fixtures/only").feature("only", value_steps)),
         3, // orphan + binding + scenario
@@ -179,6 +197,7 @@ fn main() {
 
     // A parse error fails as its own trial WITHOUT silencing sibling features.
     check(
+        &mut failures,
         "parse-error",
         run(Features::new("tests/fixtures/parse-error")
             .feature("bad", |_reg: &mut StepRegistry<World>| {})
@@ -192,6 +211,7 @@ fn main() {
     // the reported failure is the step's (failure outranks cleanup).
     DEFER_RAN.store(false, Ordering::SeqCst);
     check(
+        &mut failures,
         "defer-on-failure",
         run(Features::new("tests/fixtures/defer").feature(
             "defer",
@@ -211,6 +231,34 @@ fn main() {
     if !DEFER_RAN.load(Ordering::SeqCst) {
         failures
             .push("defer-on-failure: deferred cleanup did not run after the step failure".into());
+    }
+
+    // A feature directory that doesn't exist: one loud failing trial, never a
+    // silently empty (vacuously green) suite.
+    check(
+        &mut failures,
+        "missing-dir",
+        run(Features::new("tests/fixtures/does-not-exist")),
+        0,
+        1, // "feature directory is readable"
+        0,
+    );
+
+    // An unreadable feature FILE: its "parses" trial fails; the orphan guard
+    // still passes. (Permission bits — unix only.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("gct-guards-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("counter.feature");
+        std::fs::copy("tests/fixtures/good/counter.feature", &file).expect("copy");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let c = run(Features::new(&dir).feature("counter", value_steps));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod back");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        check(&mut failures, "unreadable-file", c, 1, 1, 0); // orphan guard passes; "counter :: parses" fails
     }
 
     if failures.is_empty() {

@@ -2,6 +2,8 @@
 name = "gherkin-cargo-test"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.78"
+readme = "README.md"
 description = "The smallest honest Gherkin runner for Rust — two boring dependencies, on cargo test via libtest-mimic, built for agent-driven BDD."
 license = "MIT"
 authors = ["Bing Ho <reps-attic-riot@duck.com>"]
