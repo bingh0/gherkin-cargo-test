@@ -136,6 +136,52 @@ FAILED: counter :: step definitions are complete and unambiguous
   });
 ```
 
+## The binding ratchet
+
+That guard failure is half of the design's central mechanism. The other half
+is `.wip()` — together they form a **ratchet**: binding coverage (the fraction
+of your feature files' steps wired to executable code) can move forward
+freely, and can never slip backward silently.
+
+The decay path the ratchet closes is induced by *normal editing*, not by bad
+tests: reword one step in a `.feature` file and its regex no longer matches;
+the scenario becomes unbound; the runner registers it as an ignored trial —
+which `cargo test` **reports as green** — and a feature you believed was
+tested is now tested by nothing, with no signal emitted. In a workflow where
+feature files are edited constantly (by you or by an agent), that path would
+be exercised weekly.
+
+So the guard fails the suite on *any* unbound step, and `.wip(base)` is the
+one sanctioned exception:
+
+- **Bootstrapping**: mark a new feature `.wip()` and bind steps one at a
+  time. Its unbound scenarios still *register* — visibly, as `[unbound]`
+  ignored trials — they just don't fail the suite. Honest green, with the
+  debt on display.
+- **The click**: when the last step binds, remove the `.wip()` call. That's
+  the pawl dropping into the next tooth — from this commit forward the
+  feature cannot silently lose coverage again.
+- **Backward motion is loud in exactly two ways**, both reviewable diffs:
+  the suite goes red (with a paste-ready, panicking definition per missing
+  step), or someone re-adds `.wip()` — a one-line, grep-able confession in
+  the test file. There is no third path.
+
+`.wip()` is therefore a **debt register**: `grep wip tests/features.rs` tells
+you exactly which features are not yet fully enforced. It relaxes *only*
+unbound-ness — ambiguity stays a hard error even for wip features ("not
+fully bound yet" never means "allowed to be ambiguous").
+
+Two companion rules seal the ratchet's other entrances: the orphan-definer
+guard (renaming a `.feature` file can't silently strand its steps), and
+skip-still-binds (`@skip` means "don't run", never "don't bind" — otherwise a
+tag would be a hole in the ratchet).
+
+The ratchet is also this crate's honest replacement for tag-based scenario
+exclusion (cucumber's `excludeTags`): scenarios awaiting data or a pending
+experiment simply stay unbound under a `.wip()` feature — visible as ignored,
+never silently green, and demanded by the guard the moment the marker comes
+off.
+
 ## Supported grammar
 
 | Construct | Notes |
