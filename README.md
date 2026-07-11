@@ -53,7 +53,7 @@ False greens have specific, boring causes. Each one is a design decision here:
 | Step definitions collide across the suite's global namespace | There is no global namespace: **each feature gets its own registry and its own typed `World`**. An agent editing one feature structurally cannot break another's bindings — the type system enforces it. |
 | A scaffolded step stub passes vacuously | Missing-step failures include a **paste-ready definition whose body panics** `pending`. You cannot paste your way to a false green. |
 | A failing assertion leaks the temp dir / process it was about to clean up | `ctx.defer(f)` runs cleanup LIFO **even when a step panics**. The step failure outranks cleanup errors. |
-| A typo'd `@skip` tag is silently inert | Misplaced tags, dangling tags, and near-miss tags (`@Skip`, `@ONLY`) are **loud errors**. `@only` itself is rejected loudly too — Rust has no `--test-only`; use `cargo test -- '<name>'`. |
+| A typo'd `@skip` tag is silently inert | Misplaced tags, dangling tags, and near-miss tags (`@Skip`, `@ONLY`) are **loud errors**. `@only` itself is rejected loudly too — a silently inert (or silently *focusing*) `@only` is the worst tag failure mode; focus one scenario with `cargo test -- '<name>'` instead. gherkin-node-test (≥0.3) rejects it identically. |
 | A step matcher that falls through silently | Steps are matched by a **registry with an unbound-step ratchet** — never by inline `if text.contains(…)` chains, where an unmatched step is a silent no-op. |
 
 The same properties are exactly what a coding agent needs, because agents act
@@ -318,7 +318,6 @@ different, and each one is deliberate:
 | Node | Rust | Why |
 |---|---|---|
 | dynamic `world` object | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the compiler now catches world-shape mistakes the JS version can't |
-| `@only` under `node --test --test-only` | **rejected loudly** | `cargo test` has no `--test-only`; a silently inert `@only` is the worst tag failure mode. Use `cargo test -- '<name>'` |
 | `@todo` → node:test `todo` | runs; failure printed and **tolerated** (trial kind `todo`) | libtest has no todo concept; this preserves "runs but doesn't gate" |
 | unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
