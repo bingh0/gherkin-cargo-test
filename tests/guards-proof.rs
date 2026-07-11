@@ -232,12 +232,15 @@ fn main() {
     );
 
     // @only: rejected loudly — there is no `--test-only` analog, so silence
-    // would be the worst outcome. The scenario itself still runs.
+    // would be the worst outcome. Rejection is ADDITIVE: the tagged scenario
+    // AND its untagged sibling both still run — the rejection never narrows
+    // the suite it polices (the same pin gherkin-node-test's onlytag fixture
+    // asserts on node/bun/deno).
     check(
         &mut failures,
         "only",
         run(Features::new("tests/fixtures/only").feature("only", value_steps)),
-        3, // orphan + binding + scenario
+        4, // orphan + binding + BOTH scenarios (tagged one included)
         1, // the @only rejection trial
         0,
     );
