@@ -271,6 +271,56 @@ fn rejects_near_miss_semantic_tags() {
     }
 }
 
+// Combined semantic tags: this runner resolves @skip before @todo and rejects
+// @only, the JS sibling's runtimes each do something else — a combination
+// can't mean the same thing everywhere, so it must not mean anything silently.
+// (Dialect parity with gherkin-node-test, which rejects these identically.)
+#[test]
+fn rejects_conflicting_semantic_tags_on_a_scenario() {
+    assert_rejects(
+        "Feature: f\n@skip @only\nScenario: s\n  Given x\n",
+        3,
+        "conflicting tags (@skip @only)",
+    );
+}
+
+#[test]
+fn rejects_conflicting_semantic_tags_on_an_outline() {
+    assert_rejects(
+        "Feature: f\n@todo @skip\nScenario Outline: o\n  Given <a>\nExamples:\n  | a |\n  | 1 |\n",
+        3,
+        "conflicting tags (@todo @skip)",
+    );
+}
+
+#[test]
+fn rejects_conflicting_tags_on_the_feature_line() {
+    assert_rejects(
+        "@skip @todo\nFeature: f\n",
+        2,
+        "conflicting tags (@skip @todo)",
+    );
+}
+
+#[test]
+fn rejects_feature_tag_conflicting_with_scenario_tag() {
+    assert_rejects(
+        "@skip\nFeature: f\n@only\nScenario: s\n  Given x\n",
+        4,
+        "conflicting tags (@skip @only)",
+    );
+}
+
+#[test]
+fn duplicate_semantic_tag_is_not_a_conflict() {
+    let p = parse_feature(
+        "@skip\nFeature: f\n@skip\nScenario: s\n  Given x\n",
+        "t.feature",
+    )
+    .expect("same tag twice is redundant, not ambiguous");
+    assert_eq!(p.scenarios[0].tags, vec!["@skip", "@skip"]);
+}
+
 // --- Parse correctness ----------------------------------------------------------
 
 #[test]

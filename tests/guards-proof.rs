@@ -36,6 +36,16 @@ fn run(f: Features) -> Conclusion {
     libtest_mimic::run(&args, f.build_trials())
 }
 
+/// Like `run`, but with `--include-ignored`: parked (ignored) trials execute.
+fn run_include_ignored(f: Features) -> Conclusion {
+    let args = Arguments {
+        test_threads: Some(1),
+        include_ignored: true,
+        ..Default::default()
+    };
+    libtest_mimic::run(&args, f.build_trials())
+}
+
 static DEFER_RAN: AtomicBool = AtomicBool::new(false);
 
 fn check(
@@ -97,6 +107,43 @@ fn main() {
         2, // orphan guard + (relaxed) binding guard
         0,
         1, // unbound scenario still ignored
+    );
+
+    // `--include-ignored` executes the parked unbound placeholder: it must
+    // FAIL with its reason, never pass vacuously (an Ok(()) placeholder body
+    // would be a false green — the exact silence this crate exists to kill).
+    check(
+        &mut failures,
+        "unbound-include-ignored",
+        run_include_ignored(
+            Features::new("tests/fixtures/unbound")
+                .feature("pipeline", |reg: &mut StepRegistry<World>| {
+                    reg.define_exact("a bound step", |_, _, _| {});
+                })
+                .wip("pipeline"),
+        ),
+        2, // orphan guard + (relaxed) binding guard
+        1, // the unbound placeholder runs and fails loudly with its reason
+        0,
+    );
+
+    // `--include-ignored` also force-runs @skip'd scenarios: their bodies are
+    // the REAL steps (pinned here by the panicking step firing), so an
+    // explicit override runs real code — skipped never means vacuous.
+    check(
+        &mut failures,
+        "skip-include-ignored",
+        run_include_ignored(Features::new("tests/fixtures/skip").feature(
+            "skip",
+            |reg: &mut StepRegistry<World>| {
+                reg.define_exact("a step that panics", |_, _, _| {
+                    panic!("@skip scenario executed — expected under --include-ignored");
+                });
+            },
+        )),
+        2, // orphan guard + binding guard
+        1, // the force-run @skip scenario executes its real (panicking) step
+        0,
     );
 
     // A step matching two definitions: the ambiguity guard fails. The scenario

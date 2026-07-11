@@ -232,7 +232,7 @@ comparison.
 | `<placeholder>` | substituted from the Examples columns — in step text **and** step data tables; every `<name>` must match a column |
 | Steps | `Given` `When` `Then` `And` `But` `*`, followed by step text |
 | Step data tables | `\|` rows after a step attach to it; the step closure receives an **`Option<&DataTable>`** as its last argument |
-| Tags | `@skip` → trial ignored (steps must still bind); `@todo` → runs, failure tolerated; `@only` → **rejected loudly** (use `cargo test -- '<filter>'`); tags on `Feature:` apply to all its scenarios; any other tag is carried on `scenario.tags` with no runtime effect |
+| Tags | `@skip` → trial ignored (steps must still bind); `@todo` → runs, failure tolerated; `@only` → **rejected loudly** (use `cargo test -- '<filter>'`); the three are **mutually exclusive — combining them is a parse error**; tags on `Feature:` apply to all its scenarios; any other tag is carried on `scenario.tags` with no runtime effect |
 | `# comment` | ignored anywhere |
 | Feature narrative | the `As a… / I want… / So that…` prose block is ignored |
 
@@ -300,6 +300,7 @@ these is a `GherkinSyntaxError` with the offending line number:
 | A step *after* its `Examples:` table | malformed ordering; the step would mis-attach |
 | Tags anywhere but immediately before `Feature:` / `Scenario:` / `Scenario Outline:` | a mis-placed `@skip` would silently not skip |
 | A near-miss semantic tag (`@Skip`, `@SKIP`, `@Only`, …) | would be silently inert |
+| Combined semantic tags (`@skip @todo` on one scenario) | every runner resolves the combination differently (this one would let `@skip` win silently); dialect parity with gherkin-node-test, which rejects these identically |
 | `Rule:` (Gherkin 6) | grouping would be silently flattened |
 | A step before any `Scenario`/`Background` | would be silently discarded |
 | A 2nd `Feature:` / `Background:`, or `Background:` after a `Scenario` | ambiguous scope |
@@ -319,7 +320,7 @@ different, and each one is deliberate:
 | dynamic `world` object | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the compiler now catches world-shape mistakes the JS version can't |
 | `@only` under `node --test --test-only` | **rejected loudly** | `cargo test` has no `--test-only`; a silently inert `@only` is the worst tag failure mode. Use `cargo test -- '<name>'` |
 | `@todo` → node:test `todo` | runs; failure printed and **tolerated** (trial kind `todo`) | libtest has no todo concept; this preserves "runs but doesn't gate" |
-| unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) | same visibility, same ratchet: the binding guard fails the suite unless `.wip()` |
+| unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
 

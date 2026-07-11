@@ -33,6 +33,8 @@
 //!                       on Feature: apply to all its scenarios; all other tags
 //!                       (e.g. @AC3) are carried but have no effect. @only is
 //!                       REJECTED loudly — use `cargo test <name filter>`.
+//!                       Combining @skip/@todo/@only on one scenario is a loud
+//!                       parse error — runners disagree on which would win.
 //!   Comments (# ...) and the Feature narrative are ignored.
 //!
 //! DELIBERATELY NOT SUPPORTED. Structural misuse is REJECTED LOUDLY — each
@@ -411,6 +413,30 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             ))
         }
     };
+    // Reject a combination of semantic tags. This runner resolves @skip before
+    // @todo and rejects @only; the JS sibling's runtimes each do something
+    // else again — a combination cannot mean the same thing everywhere, so it
+    // must not mean anything silently. (Mirrors gherkin-node-test.)
+    let no_tag_conflict = |tags: &[String], line_no: usize| -> Result<(), GherkinSyntaxError> {
+        let mut semantic: Vec<&str> = Vec::new();
+        for t in tags {
+            if matches!(t.as_str(), "@skip" | "@todo" | "@only") && !semantic.contains(&t.as_str())
+            {
+                semantic.push(t);
+            }
+        }
+        if semantic.len() > 1 {
+            return Err(GherkinSyntaxError::new(
+                filename,
+                line_no,
+                &format!(
+                    "conflicting tags ({}) — @skip/@todo/@only are mutually exclusive; keep exactly one",
+                    semantic.join(" ")
+                ),
+            ));
+        }
+        Ok(())
+    };
 
     let mut line_no = 0;
     for raw in text.split('\n') {
@@ -454,6 +480,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             feature = rest.trim().to_string();
             feature_seen = true;
             feature_tags = std::mem::take(&mut pending_tags);
+            no_tag_conflict(&feature_tags, line_no)?;
             cur = Cur::None;
             in_examples = false;
             continue;
@@ -477,6 +504,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             flush_outline(&mut outline, &mut scenarios, filename)?;
             let mut tags = feature_tags.clone();
             tags.extend(std::mem::take(&mut pending_tags));
+            no_tag_conflict(&tags, line_no)?;
             outline = Some(OutlineAcc {
                 name: rest.trim().to_string(),
                 steps: Vec::new(),
@@ -494,6 +522,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             flush_outline(&mut outline, &mut scenarios, filename)?;
             let mut tags = feature_tags.clone();
             tags.extend(std::mem::take(&mut pending_tags));
+            no_tag_conflict(&tags, line_no)?;
             scenarios.push(Scenario {
                 name: rest.trim().to_string(),
                 steps: Vec::new(),
@@ -937,10 +966,23 @@ fn feature_trials<W: Default + 'static>(
             .cloned()
             .collect();
         // Unbound scenario: registered but ignored (never silently green — the
-        // binding guard above fails the suite unless this feature is wip).
-        if steps.iter().any(|s| reg.find(&s.text).is_none()) {
+        // binding guard above fails the suite unless this feature is wip). The
+        // placeholder body FAILS with its reason: an Ok(()) body would pass
+        // vacuously under `cargo test -- --include-ignored`, the exact
+        // false green this crate exists to prevent.
+        let missing: Vec<&str> = steps
+            .iter()
+            .filter(|s| reg.find(&s.text).is_none())
+            .map(|s| s.text.as_str())
+            .collect();
+        if !missing.is_empty() {
+            let reason = format!(
+                "{} undefined step(s); first: \"{}\"",
+                missing.len(),
+                missing[0]
+            );
             trials.push(
-                Trial::test(title, || Ok(()))
+                Trial::test(title, move || Err(Failed::from(reason)))
                     .with_kind("unbound")
                     .with_ignored_flag(true),
             );
