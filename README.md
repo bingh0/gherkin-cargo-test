@@ -15,7 +15,7 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.1"   # or just vendor src/lib.rs; it's one file
+gherkin-cargo-test = "0.2"   # or just vendor src/lib.rs; it's one file
 
 [[test]]
 name = "features"
