@@ -3,8 +3,10 @@
 **The smallest honest Gherkin runner for Rust.** Two boring dependencies, no
 proc macros, no async, no framework — it turns `.feature` files into real
 `cargo test` tests (one per scenario, via [libtest-mimic]), and it treats
-every silence as a bug. One file, ~1,100 lines, small enough to read in one
-sitting or to vendor outright.
+every silence as a bug. One file, ~1,400 lines, small enough to read in one
+sitting or to vendor outright. The same file doubles as a **feature-file
+linter** for projects whose runner is something else — see
+[the linter role](#the-linter-role--under-someone-elses-runner).
 
 This is the Rust sibling of [gherkin-node-test] — same author, same grammar,
 same philosophy, ported guard-for-guard. The feature files are portable
@@ -15,7 +17,7 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.2"   # or just vendor src/lib.rs; it's one file
+gherkin-cargo-test = "0.4"   # or just vendor src/lib.rs; it's one file
 
 [[test]]
 name = "features"
@@ -220,6 +222,35 @@ agent-written Rust port, bound to md5-identical feature files, matched to
 six decimal places over thousands of PRNG-generated inputs — on the first
 comparison.
 
+This repo also eats its own cooking: `tools/parity` applies exactly this
+discipline to the parser itself, diffing this crate against the JS sibling
+over a shared corpus plus seeded fuzzing (canonical AST and lint-finding
+dumps, compared byte-for-byte). It caught a real divergence no hand-written
+test had — Rust's Unicode case folding matching the Kelvin sign `K` as `k`
+where JS refuses — before any user did.
+
+## Strictness surfaces feature-file bugs
+
+The checksum workflow above is scoped to pure kernels. The *parser's*
+strictness, though, pays off well outside that scope — including the I/O-heavy
+CLIs the diff isn't aimed at. A worked example: an agent-driven port of a
+stateful file tool — a folder organizer with moves, collision renames, undo,
+and exit codes — re-driven through the same feature files.
+
+The forensic detail is the sell. On first parse, `collisions.feature` was
+**rejected at line 2**: its `Feature:` narrative began "When a file being
+moved…", and the micro-grammar reads `When ` as a step keyword appearing before
+any Scenario. pytest-bdd had run that same file green for the life of the
+project. Porting the corpus also surfaced five real behaviors that no scenario
+documented (trailing-dot classification, symlink skip, non-regular-file skip,
+`--version`, corrupt-manifest undo) — so the contract came out **stronger than
+the suite it was ported from**. The Python original and the Rust port then produced
+byte-identical reports *and* filesystem trees across organize / dry-run / undo /
+recursive / collisions.
+
+The strict, simple parser doesn't just refuse bad input — it drives you to
+better feature files.
+
 ## Supported grammar
 
 | Construct | Notes |
@@ -322,6 +353,7 @@ different, and each one is deliberate:
 | unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
+| lint findings carry plain strings (`rule`, `severity`); `filename` defaults to `<feature>` | **`LintRule` / `LintSeverity` enums** with `as_str()`; `filename` is explicit | the compiler exhaustiveness-checks rule matches that JS can't; the *string forms and finding text* are identical both sides, held together by `tools/parity` |
 
 ## The linter role — under someone else's runner
 
@@ -388,12 +420,17 @@ cargo run --example parse -- path/to/features/*.feature
 
 Ported guard-for-guard from [gherkin-node-test], which was extracted from
 [ccr](https://github.com/bingh0/ccr) where it runs the acceptance layer of a
-shipping CLI. The port was validated three ways: a conformance suite with a
+shipping CLI. The port is validated four ways: a conformance suite with a
 rejection test for every guard above (`tests/conformance.rs`); an executed
 proof that every runner guard actually *fires* — trials are built over fixture
 features and run through libtest-mimic in-process, asserting pass/fail/ignored
-counts (`tests/guards-proof.rs`); and a real-world corpus check — the feature
+counts (`tests/guards-proof.rs`); a real-world corpus check — the feature
 suites of two shipping projects written for the JS sibling and for
-vitest-cucumber (102 files, 507 scenarios) parse with zero rejections.
+vitest-cucumber (102 files, 507 scenarios) parse with zero rejections; and the
+strongest of the four, because it's the only one where an independent
+implementation vouches: the differential parity harness (`tools/parity`),
+which holds this crate and the JS sibling to byte-identical parse trees, lint
+findings, and error-message text over a curated corpus plus thousands of
+seeded fuzz cases per run.
 
 MIT © Bing Ho
