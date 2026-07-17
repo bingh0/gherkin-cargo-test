@@ -271,6 +271,43 @@ Table cells honor the Gherkin escapes `\|` (literal pipe), `\\` (literal
 backslash) and `\n` (newline); a backslash before any other character is
 literal, so cells like `C:\Temp` need no escaping.
 
+### Scenario Outline: one scenario, many values
+
+When the same behavior should hold across a spread of inputs — the usual
+suspects plus the extremes — write it once as a `Scenario Outline` and put the
+values in the `Examples` table:
+
+```gherkin
+Scenario Outline: the counter reflects adding <amount>
+  Given a counter at 0
+  When I add <amount>
+  Then the counter is <amount>
+
+  Examples:
+    | amount           |
+    | 5                |
+    | -3               |
+    | 0.5              |
+    | 9007199254740991 |
+```
+
+Each row expands into its own independent trial — fresh `World`, `Background`
+re-run — named with the substituted title and a row suffix:
+`Counter :: the counter reflects adding -3 [2]`. Placeholders substitute in
+step text **and** step data tables; a `<name>` with no matching column is a
+parse error, not a silent leak into the step text.
+
+One honest caveat: expansion is text substitution, and in Rust a value passes
+**two** gates — the step's regex decides what *binds*, and the step body's
+`parse` decides what *survives*. The quick-start steps match `(\d+)` and parse
+into an `i64`, so the `-3` and `0.5` rows won't bind until you widen the regex
+to something like `(-?\d+(?:\.\d+)?)` — and the fractional row additionally
+needs the parse (and the `World` field) to move to `f64`. Forgetting the regex
+isn't a quiet pass: the unbound-step guard fails loudly and hands you the stub
+for the exact expanded text. And an outline with a single `Examples` row gets
+a [lint warning](#the-linter-role--under-someone-elses-runner) — that's a
+plain `Scenario` with extra ceremony, and usually a missing case.
+
 ### Step matching and `DataTable`
 
 Steps are matched by **regex source string** (`define`) or **exact literal**
