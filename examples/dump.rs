@@ -16,15 +16,26 @@
 //   SCENARIO <line> <name>
 //   TAGS <t1> <t2> ...                only when non-empty
 //   STEP <line> <keyword> <text>
+//
+// With --lint, dumps lint_feature's findings instead (nothing for a clean
+// file) — finding TEXT is part of the parity contract with the node sibling:
+//   FINDING <rule> <severity> <line> <message>
 
-use gherkin_cargo_test::{parse_feature, Step};
+use gherkin_cargo_test::{lint_feature, parse_feature, Step};
 
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 
 fn dump_step(prefix: &str, st: &Step) {
-    println!("{prefix}\t{}\t{}\t{}", st.line, esc(&st.keyword), esc(&st.text));
+    println!(
+        "{prefix}\t{}\t{}\t{}",
+        st.line,
+        esc(&st.keyword),
+        esc(&st.text)
+    );
     if let Some(table) = &st.table {
         for row in table {
             let cells: Vec<String> = row.iter().map(|c| esc(c)).collect();
@@ -34,14 +45,31 @@ fn dump_step(prefix: &str, st: &Step) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: dump <file.feature>");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let lint = args.first().map(|a| a == "--lint").unwrap_or(false);
+    if lint {
+        args.remove(0);
+    }
+    let path = args.into_iter().next().unwrap_or_else(|| {
+        eprintln!("usage: dump [--lint] <file.feature>");
         std::process::exit(2);
     });
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("READ ERROR {path}: {e}");
         std::process::exit(2);
     });
+    if lint {
+        for f in lint_feature(&text, &path) {
+            println!(
+                "FINDING\t{}\t{}\t{}\t{}",
+                f.rule.as_str(),
+                f.severity.as_str(),
+                f.line,
+                esc(&f.message)
+            );
+        }
+        return;
+    }
     match parse_feature(&text, &path) {
         Err(e) => println!("REJECT\t{}", e.line),
         Ok(p) => {

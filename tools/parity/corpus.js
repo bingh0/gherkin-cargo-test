@@ -186,6 +186,83 @@ A['empty-feature-name'] = `Feature:
 `;
 A['no-eol-at-eof'] = 'Feature: F\nScenario: s\n  Then ok';
 
+// --- lint parity: banned-word matrix + boundary/folding hostiles -------------------
+// The unit tests for lintFeature/lint_feature are hand-ported between the two
+// repos — exactly the drift class this harness exists to distrust — so every
+// banned word, casing, and boundary case is ALSO held differentially here.
+// The kelvin case is a survivor's trophy: rust's (?i) Unicode folding matched
+// K (U+212A) as k while JS's non-unicode /i refused, until the rust pattern
+// pinned ASCII folding with (?-u:…).
+A['vague-each-banned-word'] = `Feature: F
+  Scenario: a
+    When poked
+    Then it works
+  Scenario: b
+    When poked
+    Then it renders correctly
+  Scenario: c
+    When poked
+    Then it is handled properly
+  Scenario: d
+    When poked
+    Then output is as expected
+  Scenario: e
+    When poked
+    Then it handles errors
+  Scenario: f
+    When poked
+    Then an appropriate response is sent
+`;
+A['vague-case-variants'] = `Feature: F
+  Scenario: upper
+    When poked
+    Then it WORKS
+  Scenario: title
+    When poked
+    Then it Works
+  Scenario: mixed
+    When poked
+    Then output is As ExPeCtEd
+`;
+A['vague-non-matches'] = `Feature: F
+  Scenario: containment
+    When poked
+    Then the workshop opens and reworks nothing
+  Scenario: adverb-dodges
+    When poked
+    Then it responds appropriately
+  Scenario: participle-dodges
+    When poked
+    Then the error is handled
+  Scenario: underscore-glue
+    When poked
+    Then works_ is a symbol name
+`;
+A['vague-unicode-adjacency'] = `Feature: F
+  Scenario: kelvin
+    When poked
+    Then it worKs
+  Scenario: long-s
+    When poked
+    Then it workſ
+  Scenario: acute-suffix
+    When poked
+    Then it worksé
+  Scenario: acute-prefix
+    When poked
+    Then éworks here
+`;
+A['no-then-and-single-row-compose'] = `Feature: F
+  Scenario: no assertion
+    When I poke it
+  Scenario Outline: lonely and vague
+    When I add <n>
+    Then it works
+    Examples:
+      | n |
+      | 1 |
+`;
+
 // --- rejection matrix, one case per row -------------------------------------------
 R['docstring-triple-quote'] = `Feature: F
   Scenario: s

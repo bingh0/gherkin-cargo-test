@@ -23,13 +23,15 @@ const diverged = [];
 for (const [name, text] of Object.entries(cases)) {
   const file = join(DIR, `${name}.feature`);
   writeFileSync(file, text);
-  const node = run('node', [NODE_DUMP, file]);
-  const rust = run(RUST_DUMP, [file]);
-  if (node === rust) { same += 1; continue; }
-  diverged.push({ name, node, rust });
+  for (const mode of [[], ['--lint']]) {
+    const node = run('node', [NODE_DUMP, ...mode, file]);
+    const rust = run(RUST_DUMP, [...mode, file]);
+    if (node === rust) { same += 1; continue; }
+    diverged.push({ name: `${name}${mode.length ? ' [lint]' : ''}`, node, rust });
+  }
 }
 
-console.log(`${same}/${Object.keys(cases).length} cases identical`);
+console.log(`${same}/${Object.keys(cases).length * 2} case-modes identical (ast + lint per case)`);
 for (const d of diverged) {
   console.log(`\n=== DIVERGENCE: ${d.name}`);
   const n = d.node.split('\n'); const r = d.rust.split('\n');

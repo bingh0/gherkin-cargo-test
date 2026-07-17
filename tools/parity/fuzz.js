@@ -5,7 +5,7 @@
 const { writeFileSync, mkdirSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { join } = require('node:path');
-const { parseFeature, GherkinSyntaxError } = require(process.env.GNT_PATH || '/home/biho/Documents/gherkin-node-test/index.js');
+const { parseFeature, lintFeature, GherkinSyntaxError } = require(process.env.GNT_PATH || '/home/biho/Documents/gherkin-node-test/index.js');
 
 const COUNT = Number(process.argv[2] || 1000);
 let seed = Number(process.argv[3] || 20260716);
@@ -75,6 +75,14 @@ const nodeDump = (raw, name) => {
   }
 };
 
+const nodeLint = (raw, name) => {
+  try {
+    return lintFeature(raw, name)
+      .map((f) => `FINDING\t${f.rule}\t${f.severity}\t${f.line}\t${esc(f.message)}`)
+      .join('\n');
+  } catch (e) { return `NODE-CRASH\t${e.constructor.name}`; }
+};
+
 let identical = 0, accepts = 0, rejects = 0;
 const diverged = [];
 for (let i = 0; i < COUNT; i++) {
@@ -89,11 +97,15 @@ for (let i = 0; i < COUNT; i++) {
   let rd;
   try { rd = execFileSync(RUST_DUMP, [file], { encoding: 'utf8' }).replace(/\r?\n$/, ''); }
   catch (e) { rd = `RUST-CRASH\t${(e.stderr || e.message).toString().split('\n')[0]}`; }
-  if (nd === rd) {
+  const ndl = nodeLint(raw, file);
+  let rdl;
+  try { rdl = execFileSync(RUST_DUMP, ['--lint', file], { encoding: 'utf8' }).replace(/\r?\n$/, ''); }
+  catch (e) { rdl = `RUST-CRASH\t${(e.stderr || e.message).toString().split('\n')[0]}`; }
+  if (nd === rd && ndl === rdl) {
     identical += 1;
     if (nd.startsWith('REJECT')) rejects += 1; else accepts += 1;
   } else if (diverged.length < 8) {
-    diverged.push({ i, nd: nd.slice(0, 400), rd: rd.slice(0, 400) });
+    diverged.push({ i, nd: (nd === rd ? 'lint>> ' + ndl : nd).slice(0, 400), rd: (nd === rd ? 'lint>> ' + rdl : rd).slice(0, 400) });
   }
 }
 console.log(`${identical}/${COUNT} identical (${accepts} accepted, ${rejects} rejected by both)`);

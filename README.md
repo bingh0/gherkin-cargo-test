@@ -323,6 +323,32 @@ different, and each one is deliberate:
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
 
+## The linter role — under someone else's runner
+
+Everything above assumes this is your runner. It doesn't have to be:
+`lint_feature(text, filename)` exposes the same loud dialect gate, plus
+deterministic spec lints, as a **pure function** — text in, findings out. No
+filesystem, no environment, no trial registration; directory walking stays in
+*your* code. Use it to hold `.feature` files to this dialect and quality
+floor in a repo whose executor is something else (cucumber-rs — or keep the
+files portable to the node sibling's runtimes).
+
+Findings carry `rule` / `severity` / `line` / `message`:
+
+| Rule | Severity | Fires on |
+|---|---|---|
+| `dialect` | error | anything the rejection table above rejects — the exact `GherkinSyntaxError`, as a finding (the parser stops at the first violation, so it arrives alone) |
+| `no-then` | warn | a scenario whose steps never resolve to `Then` — runs code, asserts nothing (`And`/`But`/`*` inherit the preceding primary keyword, across a `Background`) |
+| `vague-then` | warn | a `Then`-resolved step containing *works · correctly · properly · as expected · handles · appropriate* — words that assert nothing checkable |
+| `single-row-outline` | warn | a `Scenario Outline` with one `Examples` row — a scenario with extra ceremony, and usually a missing case |
+
+Severity is descriptive, not policy: the wip-style debt register (filter by
+rule) belongs in your guard test. Finding **text** is identical to
+gherkin-node-test 0.4.0's `lintFeature` — the two linters are held together
+differentially by `tools/parity` (byte-for-byte finding streams over shared
+corpora and fuzzing), so a feature corpus linted here means the same thing
+linted there.
+
 ## When *not* to use this
 
 - You want the full Gherkin standard, tag-expression filtering, i18n, or
@@ -341,7 +367,8 @@ loud by construction.
 |---|---|
 | `Features::new(dir).feature(base, definer).wip(base).run()` | **high-level runner**: discover every `.feature`, scoped registries, typed worlds, guard trials |
 | `Features::build_trials()` | the same trials without running them (the guards are testable — see `tests/guards-proof.rs`) |
-| `parse_feature(text, filename)` | parse → `ParsedFeature`; `Err(GherkinSyntaxError)` on unsupported/malformed syntax |
+| `parse_feature(text, filename)` | parse → `ParsedFeature` (incl. `outlines: Vec<OutlineMeta>`); `Err(GherkinSyntaxError)` on unsupported/malformed syntax |
+| `lint_feature(text, filename)` | **linter**: dialect gate + spec lints as `Vec<LintFinding>` — pure text-in/findings-out, for use under another runner |
 | `StepRegistry<W>` | `.define(regex_src, fn)` / `.define_exact(text, fn)` / `.find(text)` / `.matching(text)` |
 | `execute_steps(steps, &registry, world)` | run a flat step list against a world (LIFO `defer` cleanup included) |
 | `check_bindings(&parsed, &registry, base, wip)` | the pure binding guard (ambiguity + unbound-step ratchet) |

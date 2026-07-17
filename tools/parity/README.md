@@ -21,13 +21,23 @@ Every run is reproducible: the fuzzers use a seeded xorshift PRNG, and any
 divergence prints both dumps plus the offending generated file (kept in
 `fuzz-out/` / `fuzz-valid-out/`).
 
-Status 2026-07-16: 59 curated + 8,000 fuzz cases (4 seeds), zero divergence —
-node 0.4.0 (`24f5a76`) vs cargo 0.2.0 working tree. This harness is the seed
-of the `gherkin-x-test` conformance-corpus extraction (bdd-v2-plan §4): when
-that repo exists, the curated corpus in `corpus.js` becomes its first accept/
-reject cases and this directory shrinks to an adapter.
+Both dumpers also take `--lint`: the finding stream (`FINDING rule severity
+line message`) is compared the same way, so `lint_feature` here and
+`lintFeature` in node are held to IDENTICAL finding text — rules, lines, and
+message wording. The fuzzers compare both streams per generated file.
 
-Known AST asymmetries (not dialect divergences — the dump format omits them):
-node 0.4.0 carries `ParsedFeature.outlines` ({name, line, rows}, powering
-`lintFeature`'s single-row-outline rule) and `ParsedFeature.file`; this crate
-does not yet. Mirror both when porting the linter role here.
+Status 2026-07-16: AST parity — 59 curated + 8,000 fuzz cases (4 seeds), zero
+divergence, node 0.4.0 (`24f5a76`) vs cargo 0.2.0 (`6c14113`). Lint parity —
+64 curated cases (128 case-modes, including the banned-word matrix and the
+Unicode-folding hostiles) + 6,000 fuzz cases with thousands of non-empty
+finding streams, zero divergence, node 0.4.0 vs cargo 0.4.0. The sibling
+versions now track the shared dialect+linter surface in lockstep — pinning
+the same version on both sides pins one de-facto dialect+lint version. This
+harness is the seed of the `gherkin-x-test`
+conformance-corpus extraction (bdd-v2-plan §4): when that repo exists, the
+curated corpus in `corpus.js` becomes its first accept/reject cases and this
+directory shrinks to an adapter.
+
+Remaining AST asymmetry (not a dialect divergence — the dump format omits
+it): node carries `ParsedFeature.file`; this crate does not. `outlines`
+landed here with the linter port.

@@ -121,11 +121,22 @@ pub struct Scenario {
     pub tags: Vec<String>,
 }
 
+/// One `Scenario Outline:` as written in the source, before expansion —
+/// enough for lint rules that reason about the construct rather than its
+/// expanded rows. Mirrors the node sibling's `ParsedFeature.outlines`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineMeta {
+    pub name: String,
+    pub line: usize,
+    pub rows: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFeature {
     pub feature: String,
     pub background: Vec<Step>,
     pub scenarios: Vec<Scenario>,
+    pub outlines: Vec<OutlineMeta>,
 }
 
 // --- Data tables ----------------------------------------------------------------
@@ -261,6 +272,7 @@ fn subst(
 fn flush_outline(
     outline: &mut Option<OutlineAcc>,
     scenarios: &mut Vec<Scenario>,
+    outlines: &mut Vec<OutlineMeta>,
     filename: &str,
 ) -> Result<(), GherkinSyntaxError> {
     let Some(o) = outline.take() else {
@@ -294,6 +306,11 @@ fn flush_outline(
             "Scenario Outline Examples: has a header but no data rows",
         ));
     }
+    outlines.push(OutlineMeta {
+        name: o.name.clone(),
+        line: o.line,
+        rows: o.rows.len(),
+    });
     for (i, row) in o.rows.iter().enumerate() {
         let map: HashMap<&str, &str> = header
             .iter()
@@ -392,6 +409,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
     let mut background_seen = false;
     let mut background: Vec<Step> = Vec::new();
     let mut scenarios: Vec<Scenario> = Vec::new();
+    let mut outlines: Vec<OutlineMeta> = Vec::new();
     let mut cur = Cur::None;
     let mut outline: Option<OutlineAcc> = None;
     let mut in_examples = false;
@@ -479,7 +497,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             if feature_seen {
                 return Err(fail(line_no, "multiple Feature: blocks in one file"));
             }
-            flush_outline(&mut outline, &mut scenarios, filename)?;
+            flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
             feature = rest.trim().to_string();
             feature_seen = true;
             feature_tags = std::mem::take(&mut pending_tags);
@@ -494,7 +512,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
                 return Err(fail(line_no, "multiple Background: blocks"));
             }
             // Expand any pending outline first, so the check below sees it.
-            flush_outline(&mut outline, &mut scenarios, filename)?;
+            flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
             if !scenarios.is_empty() {
                 return Err(fail(line_no, "Background: must appear before any Scenario"));
             }
@@ -504,7 +522,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             continue;
         }
         if let Some(rest) = line.strip_prefix("Scenario Outline:") {
-            flush_outline(&mut outline, &mut scenarios, filename)?;
+            flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
             let mut tags = feature_tags.clone();
             tags.extend(std::mem::take(&mut pending_tags));
             no_tag_conflict(&tags, line_no)?;
@@ -522,7 +540,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             continue;
         }
         if let Some(rest) = line.strip_prefix("Scenario:") {
-            flush_outline(&mut outline, &mut scenarios, filename)?;
+            flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
             let mut tags = feature_tags.clone();
             tags.extend(std::mem::take(&mut pending_tags));
             no_tag_conflict(&tags, line_no)?;
@@ -628,7 +646,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
         }
         // Anything else (Feature narrative: "As a…/I want…/So that…") is ignored.
     }
-    flush_outline(&mut outline, &mut scenarios, filename)?;
+    flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
     if !pending_tags.is_empty() {
         return Err(fail(
             line_no,
@@ -653,7 +671,216 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
         feature,
         background,
         scenarios,
+        outlines,
     })
+}
+
+// --- Linter -------------------------------------------------------------------
+
+/// A lint finding's rule. The string forms (`as_str`) match the node sibling
+/// exactly, so differential parity can compare finding streams byte-for-byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LintRule {
+    Dialect,
+    NoThen,
+    VagueThen,
+    SingleRowOutline,
+}
+
+impl LintRule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LintRule::Dialect => "dialect",
+            LintRule::NoThen => "no-then",
+            LintRule::VagueThen => "vague-then",
+            LintRule::SingleRowOutline => "single-row-outline",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintSeverity {
+    Error,
+    Warn,
+}
+
+impl LintSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LintSeverity::Error => "error",
+            LintSeverity::Warn => "warn",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFinding {
+    pub rule: LintRule,
+    pub severity: LintSeverity,
+    pub line: usize,
+    pub message: String,
+}
+
+/// Words that make a Then assert nothing checkable. Deliberately short —
+/// corpus evidence (see the node sibling's 0.4.0 commit) shows morphological
+/// broadening false-positives real specs while catching zero real vagueness.
+/// `(?-u:…)` pins the whole match to ASCII semantics — word boundaries AND
+/// case folding — matching JS's non-unicode `/i` exactly. With Unicode
+/// folding on, `(?i)` would match the Kelvin sign `K` (U+212A) as `k`, which
+/// JS's `/i` refuses to fold; the adversarial review caught this divergence
+/// live (a `worKs` Then flagged here, silent in node).
+fn vague_then_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(?-u:\b(works|correctly|properly|as expected|handles|appropriate)\b)")
+            .expect("static regex")
+    })
+}
+
+fn is_primary(kw: &str) -> bool {
+    matches!(kw, "Given" | "When" | "Then")
+}
+
+/// Lint one feature file's text: the dialect gate plus deterministic spec
+/// lints. Pure text-in/findings-out — no filesystem, no environment, no test
+/// registration — for holding `.feature` files to this dialect and quality
+/// floor in a repo whose executor is something else (cucumber-rs, or the
+/// node sibling's runners). The node sibling ships the same function with
+/// IDENTICAL finding text, verified differentially by tools/parity.
+///
+/// Rules:
+///  - `dialect` (error): the text is outside the supported subset — the exact
+///    GherkinSyntaxError as a finding. The parser stops at the first
+///    violation, so a dialect finding is always alone.
+///  - `no-then` (warn): a scenario whose own steps never resolve to Then — it
+///    runs code but asserts nothing. And/But/* inherit the preceding primary
+///    keyword, resolved across the Background boundary.
+///  - `vague-then` (warn): a Then-resolved step containing a word from the
+///    banned-vagueness list above.
+///  - `single-row-outline` (warn): a Scenario Outline with one Examples row —
+///    a scenario with extra ceremony, and usually a missing case.
+///
+/// Findings from a Scenario Outline land once per source construct — except a
+/// vagueness introduced BY a placeholder substitution, which lands for exactly
+/// the rows that produce it. Severity is descriptive, not policy: the
+/// wip-style debt register (filtering by rule) belongs to the consumer.
+pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
+    type Seen = HashSet<(LintRule, usize, String)>;
+    // Identical (rule, line, message) triples collapse: expanded outline rows
+    // share their source lines, so a row-independent finding lands once while
+    // a substitution-dependent one (different message text) lands per row.
+    fn warn(
+        findings: &mut Vec<LintFinding>,
+        seen: &mut Seen,
+        rule: LintRule,
+        line: usize,
+        message: String,
+    ) {
+        if seen.insert((rule, line, message.clone())) {
+            findings.push(LintFinding {
+                rule,
+                severity: LintSeverity::Warn,
+                line,
+                message,
+            });
+        }
+    }
+    fn check_vague(findings: &mut Vec<LintFinding>, seen: &mut Seen, st: &Step) {
+        if let Some(m) = vague_then_re().find(&st.text) {
+            warn(
+                findings,
+                seen,
+                LintRule::VagueThen,
+                st.line,
+                format!(
+                    "vague Then \"{}\" — \"{}\" is not a checkable outcome; name the observable result",
+                    st.text,
+                    m.as_str()
+                ),
+            );
+        }
+    }
+
+    let parsed = match parse_feature(text, filename) {
+        Ok(p) => p,
+        Err(e) => {
+            // The structured finding already carries .line; strip the parser's
+            // file:line prefix so consumers composing "file:line: message"
+            // from the finding don't print it twice.
+            let msg = e.to_string();
+            let prefix = format!("{filename}:{}: ", e.line);
+            let message = msg.strip_prefix(&prefix).unwrap_or(&msg).to_string();
+            return vec![LintFinding {
+                rule: LintRule::Dialect,
+                severity: LintSeverity::Error,
+                line: e.line,
+                message,
+            }];
+        }
+    };
+
+    let mut findings: Vec<LintFinding> = Vec::new();
+    let mut seen: Seen = HashSet::new();
+
+    // Background steps are shared by every scenario: resolve and lint them once.
+    let mut bg_last: Option<&str> = None;
+    for st in &parsed.background {
+        if is_primary(&st.keyword) {
+            bg_last = Some(st.keyword.as_str());
+        }
+        if bg_last == Some("Then") {
+            check_vague(&mut findings, &mut seen, st);
+        }
+    }
+
+    let outline_by_line: HashMap<usize, &OutlineMeta> =
+        parsed.outlines.iter().map(|o| (o.line, o)).collect();
+    for sc in &parsed.scenarios {
+        let outline = outline_by_line.get(&sc.line).copied();
+        let mut last = bg_last;
+        let mut has_then = false;
+        for st in &sc.steps {
+            if is_primary(&st.keyword) {
+                last = Some(st.keyword.as_str());
+            }
+            if last == Some("Then") {
+                has_then = true;
+                check_vague(&mut findings, &mut seen, st);
+            }
+        }
+        if !has_then {
+            let label = match outline {
+                Some(o) => format!("Scenario Outline \"{}\"", o.name),
+                None => format!("Scenario \"{}\"", sc.name),
+            };
+            warn(
+                &mut findings,
+                &mut seen,
+                LintRule::NoThen,
+                sc.line,
+                format!("{label} has no Then step — it runs code but asserts nothing"),
+            );
+        }
+    }
+
+    for o in &parsed.outlines {
+        if o.rows == 1 {
+            warn(
+                &mut findings,
+                &mut seen,
+                LintRule::SingleRowOutline,
+                o.line,
+                format!(
+                    "Scenario Outline \"{}\" has one Examples row — a scenario with extra ceremony, and usually a missing case",
+                    o.name
+                ),
+            );
+        }
+    }
+
+    // Stable sort: line ties keep push order, matching the node sibling.
+    findings.sort_by_key(|f| f.line);
+    findings
 }
 
 // --- World context ------------------------------------------------------------
