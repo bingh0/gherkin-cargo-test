@@ -106,7 +106,10 @@ pub struct Step {
     pub keyword: String,
     pub text: String,
     pub table: Option<Vec<Vec<String>>>,
-    /// 1-based line in the .feature file (the Outline's line for expanded rows).
+    /// 1-based line in the .feature file. Steps expanded from a Scenario
+    /// Outline keep their own source line (the SCENARIO carries the Outline's
+    /// line) — verified against the node sibling by the differential parity
+    /// harness (tools/parity).
     pub line: usize,
 }
 
