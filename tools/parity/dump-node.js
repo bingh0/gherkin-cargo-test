@@ -34,6 +34,7 @@ try {
     if (sc.tags.length) out.push(`TAGS\t${sc.tags.map(esc).join('\t')}`);
     for (const st of sc.steps) dumpStep('STEP', st);
   }
+  for (const n of p.narrative) out.push(`NARRATIVE\t${n.line}\t${n.inBody}\t${esc(n.text)}`);
 } catch (e) {
   if (!(e instanceof GherkinSyntaxError)) throw e;
   out.length = 0;

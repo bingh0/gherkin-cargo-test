@@ -131,12 +131,27 @@ pub struct OutlineMeta {
     pub rows: usize,
 }
 
+/// One line the parser dropped as narrative, recorded at its single
+/// fall-through — these are exactly the silently ignored lines, and the
+/// linter's near-miss-keyword rule reads them off the parse so "dropped by
+/// the parser" and "checked by the lint" can never drift apart. `in_body` =
+/// inside a Scenario/Outline/Background body, the scope of the step-keyword
+/// half of that rule. Mirrors the node sibling's `ParsedFeature.narrative`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NarrativeLine {
+    pub line: usize,
+    /// The line's text, trimmed — as the parser saw it.
+    pub text: String,
+    pub in_body: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFeature {
     pub feature: String,
     pub background: Vec<Step>,
     pub scenarios: Vec<Scenario>,
     pub outlines: Vec<OutlineMeta>,
+    pub narrative: Vec<NarrativeLine>,
 }
 
 // --- Data tables ----------------------------------------------------------------
@@ -410,6 +425,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
     let mut background: Vec<Step> = Vec::new();
     let mut scenarios: Vec<Scenario> = Vec::new();
     let mut outlines: Vec<OutlineMeta> = Vec::new();
+    let mut narrative: Vec<NarrativeLine> = Vec::new();
     let mut cur = Cur::None;
     let mut outline: Option<OutlineAcc> = None;
     let mut in_examples = false;
@@ -644,7 +660,13 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             }
             continue;
         }
-        // Anything else (Feature narrative: "As a…/I want…/So that…") is ignored.
+        // Anything else (Feature narrative: "As a…/I want…/So that…") is
+        // ignored — but recorded: see NarrativeLine.
+        narrative.push(NarrativeLine {
+            line: line_no,
+            text: line.to_string(),
+            in_body: !matches!(cur, Cur::None),
+        });
     }
     flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
     if !pending_tags.is_empty() {
@@ -672,6 +694,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
         background,
         scenarios,
         outlines,
+        narrative,
     })
 }
 
@@ -685,6 +708,7 @@ pub enum LintRule {
     NoThen,
     VagueThen,
     SingleRowOutline,
+    NearMissKeyword,
 }
 
 impl LintRule {
@@ -694,6 +718,7 @@ impl LintRule {
             LintRule::NoThen => "no-then",
             LintRule::VagueThen => "vague-then",
             LintRule::SingleRowOutline => "single-row-outline",
+            LintRule::NearMissKeyword => "near-miss-keyword",
         }
     }
 }
@@ -741,6 +766,102 @@ fn is_primary(kw: &str) -> bool {
     matches!(kw, "Given" | "When" | "Then")
 }
 
+/// JS's `\s` (and `String.prototype.trim`'s set, minus nothing we meet in
+/// practice): the near-miss scans below run over text the node sibling scans
+/// with non-unicode `\s`, so the whitespace set is pinned to JS's rather than
+/// `char::is_whitespace` (which adds U+0085 NEL and lacks U+FEFF — the same
+/// divergence class the vague-then regex pins against, caught live there).
+fn js_ws(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\x0B' | '\x0C' | '\r' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
+}
+
+fn skip_js_ws(text: &str, at: usize) -> usize {
+    at + text[at..]
+        .chars()
+        .take_while(|c| js_ws(*c))
+        .map(char::len_utf8)
+        .sum::<usize>()
+}
+
+/// ASCII case-insensitive prefix match at a byte offset — exactly the folding
+/// JS's non-unicode `/i` applies to an ASCII pattern (no `ſ`→`s`, no Kelvin
+/// `K`→`k`). Returns the offset past the word; ASCII match implies a char
+/// boundary.
+fn match_ascii_ci(text: &str, at: usize, word: &str) -> Option<usize> {
+    let rest = &text.as_bytes()[at..];
+    if rest.len() >= word.len() && rest[..word.len()].eq_ignore_ascii_case(word.as_bytes()) {
+        Some(at + word.len())
+    } else {
+        None
+    }
+}
+
+/// The construct-header half of near-miss-keyword: a construct word (any
+/// case, any spacing) followed by a colon. Mirrors the node sibling's
+/// `/^(feature|background|scenario\s*outline|scenario|examples)\s*:/i` —
+/// ordered alternatives, first match wins. `Rule:` is deliberately absent:
+/// its exact form is itself a dialect error, so a near miss is not a rescue —
+/// and "rule: never deploy on Friday" is plausible prose. Returns the matched
+/// prefix (through the colon) and the one exact form.
+fn near_miss_construct(text: &str) -> Option<(&str, &'static str)> {
+    const CONSTRUCTS: [(&str, Option<&str>, &str); 5] = [
+        ("feature", None, "Feature:"),
+        ("background", None, "Background:"),
+        ("scenario", Some("outline"), "Scenario Outline:"),
+        ("scenario", None, "Scenario:"),
+        ("examples", None, "Examples:"),
+    ];
+    for (first, second, exact) in CONSTRUCTS {
+        let Some(mut pos) = match_ascii_ci(text, 0, first) else {
+            continue;
+        };
+        if let Some(second) = second {
+            let Some(p) = match_ascii_ci(text, skip_js_ws(text, pos), second) else {
+                continue;
+            };
+            pos = p;
+        }
+        let end = skip_js_ws(text, pos);
+        if text[end..].starts_with(':') {
+            return Some((&text[..end + 1], exact));
+        }
+    }
+    None
+}
+
+/// The step-keyword half: the line's first word, provided it is followed by
+/// whitespace and further text — a bare "given" could not have been a step at
+/// any casing. Mirrors the node sibling's `/^(\S+)\s+\S/`.
+fn first_word_of_step_shape(text: &str) -> Option<&str> {
+    let word_end = text.find(js_ws)?;
+    if word_end == 0 || skip_js_ws(text, word_end) == text.len() {
+        return None;
+    }
+    Some(&text[..word_end])
+}
+
+fn step_keyword_exact(lower: &str) -> Option<&'static str> {
+    // `*` is excluded: it has no case variants, so it cannot be a near miss.
+    match lower {
+        "given" => Some("Given"),
+        "when" => Some("When"),
+        "then" => Some("Then"),
+        "and" => Some("And"),
+        "but" => Some("But"),
+        _ => None,
+    }
+}
+
 /// Lint one feature file's text: the dialect gate plus deterministic spec
 /// lints. Pure text-in/findings-out — no filesystem, no environment, no test
 /// registration — for holding `.feature` files to this dialect and quality
@@ -759,6 +880,19 @@ fn is_primary(kw: &str) -> bool {
 ///    banned-vagueness list above.
 ///  - `single-row-outline` (warn): a Scenario Outline with one Examples row —
 ///    a scenario with extra ceremony, and usually a missing case.
+///  - `near-miss-keyword` (warn): a silently dropped line that was almost
+///    certainly meant as syntax, read off the parser's own record of the
+///    lines it ignored as narrative (`ParsedFeature.narrative`). Two shapes:
+///    inside a scenario or Background body, a first word matching a step
+///    keyword case-insensitively but not exactly (`when I add 5`) — the
+///    requirement it stated is gone; and anywhere, a line shaped like a
+///    construct header but not in the one exact form the parser recognizes
+///    (`scenario: b`, `Scenario : b`) — the construct never starts, and a
+///    lowercase `scenario:` merges its steps into the PREVIOUS scenario,
+///    unseeable by the no-steps guard and `no-then` because the scenario
+///    never exists. The step check is scoped to bodies (the Feature narrative
+///    is prose by design); the construct check is not (the trailing colon is
+///    syntax-shaped anywhere). `Rule:` is exempt — see near_miss_construct.
 ///
 /// Findings from a Scenario Outline land once per source construct — except a
 /// vagueness introduced BY a placeholder substitution, which lands for exactly
@@ -875,6 +1009,49 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
                     o.name
                 ),
             );
+        }
+    }
+
+    // near-miss-keyword. Walks the narrative lines the parser recorded as it
+    // dropped them — the parser's fall-through IS the definition of "silently
+    // dropped", so the rule cannot drift from the parse. A correctly cased
+    // step or an exact construct header never appears here: the parser
+    // consumed it. Message text is byte-identical to the node sibling.
+    for n in &parsed.narrative {
+        if let Some((shown, exact)) = near_miss_construct(&n.text) {
+            if shown != exact {
+                warn(
+                    &mut findings,
+                    &mut seen,
+                    LintRule::NearMissKeyword,
+                    n.line,
+                    format!(
+                        "\"{shown}\" is not the construct keyword \"{exact}\" — constructs are recognized only in that exact form, so this line is parsed as narrative: the construct never starts, and what follows it belongs to whatever came before"
+                    ),
+                );
+            }
+            continue;
+        }
+        // Step keywords are checked only inside a body: the Feature narrative
+        // is prose by design and may open a sentence with "when" or "and".
+        if !n.in_body {
+            continue;
+        }
+        let Some(word) = first_word_of_step_shape(&n.text) else {
+            continue;
+        };
+        if let Some(exact) = step_keyword_exact(&word.to_lowercase()) {
+            if word != exact {
+                warn(
+                    &mut findings,
+                    &mut seen,
+                    LintRule::NearMissKeyword,
+                    n.line,
+                    format!(
+                        "\"{word}\" is not the step keyword \"{exact}\" — keywords are exact-case, so this line is parsed as narrative and its requirement is silently dropped"
+                    ),
+                );
+            }
         }
     }
 

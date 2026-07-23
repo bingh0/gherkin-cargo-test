@@ -43,6 +43,10 @@ function gen() {
   const steps = (allowPh, allowTable) => {
     for (let i = 0; i < 1 + int(3); i++) {
       L.push(`    ${pick(kw)} ${text(3)}${allowPh && maybe(0.5) ? ' ' + ph() : ''}`);
+      // A near-miss line is narrative, so the file stays valid — this is the
+      // accept-path exercise of near-miss-keyword.
+      if (maybe(0.12)) L.push(`    ${pick(['given', 'WHEN', 'then', 'aNd', 'BUT'])} ${text(2)}`);
+      if (maybe(0.06)) L.push(`  ${pick(['scenario: b', 'Scenario : b', 'examples :', 'rule: prose', 'scenarios: prose'])}`);
       comment();
       if (allowTable && maybe(0.3)) {
         const k = 1 + int(3);
@@ -92,6 +96,7 @@ const nodeDump = (raw, name) => {
       if (sc.tags.length) out.push(`TAGS\t${sc.tags.map(esc).join('\t')}`);
       for (const st of sc.steps) step('STEP', st);
     }
+    for (const n of p.narrative) out.push(`NARRATIVE\t${n.line}\t${n.inBody}\t${esc(n.text)}`);
     return out.join('\n');
   } catch (e) {
     if (!(e instanceof GherkinSyntaxError)) return `NODE-CRASH\t${e.constructor.name}: ${e.message}`;

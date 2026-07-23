@@ -38,6 +38,15 @@ conformance-corpus extraction (bdd-v2-plan §4): when that repo exists, the
 curated corpus in `corpus.js` becomes its first accept/reject cases and this
 directory shrinks to an adapter.
 
+Status 2026-07-22 (0.5.0): both dumps gained `NARRATIVE <line> <in_body>
+<text>` records — the parser-side narrative capture is itself part of the
+parity surface now, since `near-miss-keyword` reads findings off it. Fuzzer
+pools gained wrong-case step keywords and wrong-form construct headers (plus
+quiet lookalikes: plurals, `rule:`, `example:`, glued `scenarioutline:`).
+128 curated case-modes + 8,000 fuzz cases (2 seeds per fuzzer), zero
+divergence, 919 fuzz files producing 1,227 byte-identical near-miss findings,
+node 0.5.0 (`576f974`) vs cargo 0.5.0.
+
 Remaining AST asymmetry (not a dialect divergence — the dump format omits
 it): node carries `ParsedFeature.file`; this crate does not. `outlines`
-landed here with the linter port.
+landed here with the linter port, `narrative` with 0.5.0.

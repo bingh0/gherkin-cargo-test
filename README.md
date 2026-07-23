@@ -410,10 +410,22 @@ Findings carry `rule` / `severity` / `line` / `message`:
 | `no-then` | warn | a scenario whose steps never resolve to `Then` — runs code, asserts nothing (`And`/`But`/`*` inherit the preceding primary keyword, across a `Background`) |
 | `vague-then` | warn | a `Then`-resolved step containing *works · correctly · properly · as expected · handles · appropriate* — words that assert nothing checkable |
 | `single-row-outline` | warn | a `Scenario Outline` with one `Examples` row — a scenario with extra ceremony, and usually a missing case |
+| `near-miss-keyword` | warn | a silently dropped line that was almost certainly meant as syntax: a wrong-case step keyword inside a scenario or `Background` body (`when I add 5`, `GIVEN a counter`), or — anywhere — a construct header that isn't the one exact form the parser recognizes (`scenario: b`, `Scenario : b`, `SCENARIO OUTLINE: b`) |
+
+`near-miss-keyword` is the counterpart to the near-miss *tag* the parser
+already rejects outright (`@Skip`, `@Only`): keywords are exact, and anything
+else on the line is narrative, dropped without a finding. A wrong-case step
+keyword loses one requirement; a wrong-form `scenario:` is worse — the
+scenario never exists and its steps silently merge into the *previous*
+scenario, unseeable by the no-steps guard and `no-then` precisely because
+there is no scenario to inspect. The rule reads the dropped lines off the
+parse itself (`ParsedFeature.narrative`), so what the linter checks and what
+the parser drops cannot drift apart. `Rule:` is exempt: its exact form is
+itself a `dialect` error in this subset, so a near miss is not a rescue.
 
 Severity is descriptive, not policy: the wip-style debt register (filter by
 rule) belongs in your guard test. Finding **text** is identical to
-gherkin-node-test 0.4.0's `lintFeature` — the two linters are held together
+gherkin-node-test 0.5.0's `lintFeature` — the two linters are held together
 differentially by `tools/parity` (byte-for-byte finding streams over shared
 corpora and fuzzing), so a feature corpus linted here means the same thing
 linted there.

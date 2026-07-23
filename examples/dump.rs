@@ -16,6 +16,7 @@
 //   SCENARIO <line> <name>
 //   TAGS <t1> <t2> ...                only when non-empty
 //   STEP <line> <keyword> <text>
+//   NARRATIVE <line> <in_body> <text> a line the parser dropped as narrative
 //
 // With --lint, dumps lint_feature's findings instead (nothing for a clean
 // file) — finding TEXT is part of the parity contract with the node sibling:
@@ -86,6 +87,9 @@ fn main() {
                 for st in &sc.steps {
                     dump_step("STEP", st);
                 }
+            }
+            for n in &p.narrative {
+                println!("NARRATIVE\t{}\t{}\t{}", n.line, n.in_body, esc(&n.text));
             }
         }
     }

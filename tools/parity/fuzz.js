@@ -24,6 +24,16 @@ const words = ['counter', 'is', 'at', 'the', 'a', 'poked', 'beeps', 'C:\\Temp', 
 const cellPool = ['a', '', ' ', 'a\\|b', 'c\\\\d', 'e\\nf', '\\q', 'x\\', '<n>', '<x>', '42', 'ada lovelace', '|nope', 'café'];
 const tagPool = ['@skip', '@todo', '@only', '@AC3', '@Skip', '@SKIP', '@Todo', '@a@b', '@wip'];
 const kw = ['Given', 'When', 'Then', 'And', 'But', '*'];
+// near-miss-keyword material: wrong-case step keywords, and construct headers
+// off by case or spacing (plus lookalikes that must stay quiet: plurals,
+// `rule:`, `example:`, glued `scenarioutline:`).
+const badKw = ['given', 'GIVEN', 'gIvEn', 'when', 'WHEN', 'then', 'THEN', 'and', 'aNd', 'but', 'BUT'];
+const badConstruct = [
+  'scenario: b', 'Scenario : b', 'SCENARIO: x', 'scenario:b', 'scenario:',
+  'Scenario outline: o', 'SCENARIO OUTLINE: o', 'ScenarioOutline: o', 'scenariooutline: o',
+  'examples:', 'examples :', 'EXAMPLES:', 'background: seeded', 'BACKGROUND:', 'feature: extra',
+  'scenarios: prose', 'scenario outlines: prose', 'rule: prose', 'example: prose', 'features: prose',
+];
 
 const text = (n) => Array.from({ length: 1 + int(n) }, () => pick(words)).join(' ');
 const row = () => `      | ${Array.from({ length: 1 + int(4) }, () => pick(cellPool)).join(' | ')} |`;
@@ -51,6 +61,9 @@ const lineGens = [
   () => `      | ${pick(cellPool)} | ${pick(cellPool)}`, // missing closing pipe
   () => '      |',
   () => `${pick(kw)}${text(2)}`,    // glued keyword (narrative)
+  () => `    ${pick(badKw)} ${text(3)}`,  // near-miss step keyword
+  () => `    ${pick(badKw)}`,             // bare near-miss keyword (quiet)
+  () => `  ${pick(badConstruct)}`,        // near-miss construct header
 ];
 
 const esc = (s) => s.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n');
@@ -68,6 +81,7 @@ const nodeDump = (raw, name) => {
       if (sc.tags.length) out.push(`TAGS\t${sc.tags.map(esc).join('\t')}`);
       for (const st of sc.steps) step('STEP', st);
     }
+    for (const n of p.narrative) out.push(`NARRATIVE\t${n.line}\t${n.inBody}\t${esc(n.text)}`);
     return out.join('\n');
   } catch (e) {
     if (!(e instanceof GherkinSyntaxError)) return `NODE-CRASH\t${e.constructor.name}`;
