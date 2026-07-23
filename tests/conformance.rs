@@ -3,11 +3,12 @@
 // DataTable semantics, registry matching, snippet validity, execution and
 // deferred-cleanup semantics, and the pure binding guard.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use gherkin_cargo_test::{
-    build_snippet, check_bindings, execute_steps, parse_feature, DataTable, GherkinSyntaxError,
-    Step, StepRegistry,
+    build_snippet, check_bindings, execute_steps, parse_feature, DataTable, Features,
+    GherkinSyntaxError, Step, StepRegistry, Wip,
 };
 
 fn err_of(text: &str) -> GherkinSyntaxError {
@@ -688,11 +689,11 @@ fn binding_guard_reports_ambiguity() {
     reg.define(r"step", |_, _, _| {});
     let p =
         parse_feature("Feature: f\nScenario: s\n  Given a step\n", "f.feature").expect("parses");
-    let e = check_bindings(&p, &reg, "f", false).expect_err("must fail");
+    let e = check_bindings(&p, &reg, "f", &Wip::No).expect_err("must fail");
     assert!(e.contains("matching >1 definition"), "got: {e}");
     assert!(e.contains("\"a step\""), "got: {e}");
     // Ambiguity is a hard error even for wip features.
-    check_bindings(&p, &reg, "f", true).expect_err("ambiguity must fail even when wip");
+    check_bindings(&p, &reg, "f", &Wip::Feature).expect_err("ambiguity must fail even when wip");
 }
 
 #[test]
@@ -703,7 +704,7 @@ fn binding_guard_ratchets_unbound_steps_with_snippets() {
         "f.feature",
     )
     .expect("parses");
-    let e = check_bindings(&p, &reg, "f", false).expect_err("must fail");
+    let e = check_bindings(&p, &reg, "f", &Wip::No).expect_err("must fail");
     assert!(e.contains("unbound steps"), "got: {e}");
     assert!(e.contains(".wip()"), "got: {e}");
     assert!(e.contains("// lonely 1"), "got: {e}");
@@ -715,7 +716,7 @@ fn binding_guard_ratchets_unbound_steps_with_snippets() {
         "unbound steps must dedupe: {e}"
     );
     // wip relaxes the ratchet (and only the ratchet)
-    check_bindings(&p, &reg, "f", true).expect("wip allows unbound");
+    check_bindings(&p, &reg, "f", &Wip::Feature).expect("wip allows unbound");
 }
 
 #[test]
@@ -726,12 +727,110 @@ fn binding_guard_checks_background_and_skip_scenarios_too() {
         "f.feature",
     )
     .expect("parses");
-    let e = check_bindings(&p, &reg, "f", false).expect_err("must fail");
+    let e = check_bindings(&p, &reg, "f", &Wip::No).expect_err("must fail");
     assert!(e.contains("// base"), "background steps are ratcheted: {e}");
     assert!(
         e.contains("// skipped-but-must-bind"),
         "skip means don't run, never don't bind: {e}"
     );
+}
+
+// --- 0.7.0: scenario-scoped wip + the wip register's own ratchet -----------------
+
+/// The partial shape: one bound scenario, one pending plain scenario, one
+/// pending outline (two rows) — driven against a registry binding only "bound".
+fn partial_feature() -> gherkin_cargo_test::ParsedFeature {
+    parse_feature(
+        "Feature: f\nScenario: ready\n  Given bound\nScenario: pending thing\n  Given missing\n\
+         Scenario Outline: sweep <k>\n  Given case <k> missing\n\n  Examples:\n    | k |\n    | 1 |\n    | 2 |\n",
+        "f.feature",
+    )
+    .expect("parses")
+}
+
+fn bound_only() -> StepRegistry<()> {
+    let mut reg: StepRegistry<()> = StepRegistry::new();
+    reg.define_exact("bound", |_, _, _| {});
+    reg
+}
+
+fn titles(list: &[&str]) -> HashSet<String> {
+    list.iter().map(|t| t.to_string()).collect()
+}
+
+#[test]
+fn scenario_wip_holds_open_only_the_named_scenarios() {
+    let p = partial_feature();
+    let reg = bound_only();
+    // Full cover — the outline by SOURCE title, spanning both rows — passes.
+    check_bindings(
+        &p,
+        &reg,
+        "f",
+        &Wip::Scenarios(titles(&["pending thing", "sweep <k>"])),
+    )
+    .expect("covered scenarios may be unbound");
+    // Partial cover: the uncovered outline's unbound steps fail with snippets.
+    let e = check_bindings(&p, &reg, "f", &Wip::Scenarios(titles(&["pending thing"])))
+        .expect_err("must fail");
+    assert!(e.contains("unbound steps"), "got: {e}");
+    assert!(e.contains("wip entry"), "got: {e}");
+    assert!(e.contains("// case 1 missing"), "got: {e}");
+}
+
+#[test]
+fn scenario_wip_strands_a_title_matching_nothing() {
+    let p = partial_feature();
+    let reg = bound_only();
+    let e = check_bindings(
+        &p,
+        &reg,
+        "f",
+        &Wip::Scenarios(titles(&["pending thing", "sweep <k>", "renamed away"])),
+    )
+    .expect_err("must fail");
+    assert!(
+        e.contains("no matching Scenario/Scenario Outline"),
+        "got: {e}"
+    );
+    assert!(e.contains("'renamed away'"), "got: {e}");
+}
+
+#[test]
+fn wip_register_is_ratcheted_against_rot() {
+    let p = partial_feature();
+    let reg = bound_only();
+    // Scenario staleness: 'ready' is fully bound but still listed.
+    let e = check_bindings(
+        &p,
+        &reg,
+        "f",
+        &Wip::Scenarios(titles(&["ready", "pending thing", "sweep <k>"])),
+    )
+    .expect_err("must fail");
+    assert!(e.contains("fully bound"), "got: {e}");
+    assert!(e.contains("'ready'"), "got: {e}");
+    // Feature staleness: a fully bound feature still marked wip whole.
+    let all_bound =
+        parse_feature("Feature: f\nScenario: s\n  Given bound\n", "f.feature").expect("parses");
+    let e = check_bindings(&all_bound, &reg, "f", &Wip::Feature).expect_err("must fail");
+    assert!(e.contains("fully bound"), "got: {e}");
+    assert!(e.contains(".wip()"), "got: {e}");
+}
+
+#[test]
+#[should_panic(expected = "both as a whole feature and per-scenario")]
+fn wip_shapes_are_mutually_exclusive_per_feature() {
+    let _ = Features::new("tests/fixtures/partial")
+        .wip("partial")
+        .wip_scenarios("partial", ["pending thing"]);
+}
+
+#[test]
+#[should_panic(expected = "claims nothing")]
+fn wip_scenarios_rejects_an_empty_title_list() {
+    let empty: [&str; 0] = [];
+    let _ = Features::new("tests/fixtures/partial").wip_scenarios("partial", empty);
 }
 
 // --- 0.6.0: Feature with no scenarios --------------------------------------------

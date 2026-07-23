@@ -109,6 +109,93 @@ fn main() {
         1, // unbound scenario still ignored
     );
 
+    // --- Scenario-scoped wip + the wip register's own ratchet ----------------
+    // .wip_scenarios(base, titles) holds open only the named scenarios (by
+    // SOURCE title — an outline's title covers every expanded row) while the
+    // rest of the feature keeps the full unbound-step ratchet. Both wip shapes
+    // are ratcheted against rot: fully bound but still listed FAILS.
+
+    let partial_defs = |reg: &mut StepRegistry<World>| {
+        reg.define_exact("a bound step", |_, _, _| {});
+    };
+
+    // Covering exactly the pending constructs: green, the bound scenario stays
+    // enforced, and the pending plain scenario + BOTH expanded rows are ignored.
+    check(
+        &mut failures,
+        "scenario-wip",
+        run(Features::new("tests/fixtures/partial")
+            .feature("partial", partial_defs)
+            .wip_scenarios("partial", ["pending thing", "pending sweep <k>"])),
+        3, // orphan guard + binding guard + the enforced scenario
+        0,
+        3, // pending plain scenario + both expanded outline rows
+    );
+
+    // Covering only ONE pending construct: the uncovered outline's unbound
+    // step fails the binding guard — the ratchet stays tight outside the entry.
+    check(
+        &mut failures,
+        "scenario-wip-ratchet",
+        run(Features::new("tests/fixtures/partial")
+            .feature("partial", partial_defs)
+            .wip_scenarios("partial", ["pending thing"])),
+        2, // orphan guard + the enforced scenario
+        1, // binding guard fails on the uncovered outline
+        3,
+    );
+
+    // A title naming no Scenario/Scenario Outline: stranded, fails the guard.
+    check(
+        &mut failures,
+        "scenario-wip-orphan-title",
+        run(Features::new("tests/fixtures/partial")
+            .feature("partial", partial_defs)
+            .wip_scenarios(
+                "partial",
+                ["pending thing", "no such scenario", "pending sweep <k>"],
+            )),
+        2,
+        1, // binding guard fails on the stranded title
+        3,
+    );
+
+    // A fully bound scenario still listed: stale, fails the guard.
+    check(
+        &mut failures,
+        "scenario-wip-stale",
+        run(Features::new("tests/fixtures/partial")
+            .feature("partial", partial_defs)
+            .wip_scenarios("partial", ["ready", "pending thing", "pending sweep <k>"])),
+        2,
+        1, // binding guard fails: 'ready' is fully bound
+        3,
+    );
+
+    // A fully bound FEATURE still marked .wip() whole: stale, fails the guard.
+    check(
+        &mut failures,
+        "wip-stale",
+        run(Features::new("tests/fixtures/good")
+            .feature("counter", value_steps)
+            .wip("counter")),
+        2, // orphan guard + the scenario (which runs fine)
+        1, // binding guard fails: nothing left unbound
+        0,
+    );
+
+    // A wip basename naming no feature file: stranded, fails the orphan guard.
+    check(
+        &mut failures,
+        "wip-orphan-base",
+        run(Features::new("tests/fixtures/good")
+            .feature("counter", value_steps)
+            .wip("ghost")),
+        2, // binding guard + the scenario
+        1, // orphan guard fails
+        0,
+    );
+
     // `--include-ignored` executes the parked unbound placeholder: it must
     // FAIL with its reason, never pass vacuously (an Ok(()) placeholder body
     // would be a false green — the exact silence this crate exists to kill).

@@ -173,6 +173,42 @@ you exactly which features are not yet fully enforced. It relaxes *only*
 unbound-ness — ambiguity stays a hard error even for wip features ("not
 fully bound yet" never means "allowed to be ambiguous").
 
+### Scenario-scoped wip
+
+`.wip(base)` holds a *whole* feature open — the right grain while
+bootstrapping, but too coarse for a feature that is 10/12 bound with two
+scenarios waiting on an interface that doesn't exist yet. Wip-ing the whole
+feature would relax the ratchet for the ten bound scenarios too. So the
+register has a second grain:
+
+```rust
+Features::new("features")
+    .feature("smoothing", smoothing_steps)   // 10/12 bound
+    .wip_scenarios("smoothing", [
+        "resumes after a gap",               // by SOURCE title — an outline's
+        "streams the tail <mode>",           //   title covers every expanded row
+    ])
+    .run()
+```
+
+The named scenarios register as ignored exactly like whole-feature wip; every
+*other* scenario in the feature keeps the full can't-silently-lose-a-binding
+guarantee. Two properties keep the finer grain honest:
+
+- **Scenario wip means "expected-unbound", never "skip".** A listed scenario
+  whose steps all happen to be bound runs normally — this lever cannot
+  suppress executable code. To pend it, leave its distinguishing step
+  unbound; there always is one (the step touching the unbuilt interface).
+- **Both wip shapes are ratcheted against rot.** An entry whose feature — or
+  scenario — has become fully bound *fails the suite* until the entry is
+  removed: an allowlist that could go stale silently would hold the ratchet
+  open for nothing. Likewise an entry naming a feature or scenario that no
+  longer exists fails loudly; renaming can't strand debt off the register.
+
+Under a wip'd feature, the ignored trials you see are exactly the ones the
+register declares — a reviewer can tell "intentionally pending" from
+"someone broke a binding" by grepping the entry.
+
 Two companion rules seal the ratchet's other entrances: the orphan-definer
 guard (renaming a `.feature` file can't silently strand its steps), and
 skip-still-binds (`@skip` means "don't run", never "don't bind" — otherwise a
@@ -180,9 +216,9 @@ tag would be a hole in the ratchet).
 
 The ratchet is also this crate's honest replacement for tag-based scenario
 exclusion (cucumber's `excludeTags`): scenarios awaiting data or a pending
-experiment simply stay unbound under a `.wip()` feature — visible as ignored,
-never silently green, and demanded by the guard the moment the marker comes
-off.
+experiment simply stay unbound under a `.wip()` feature — or, finer, under a
+`.wip_scenarios()` entry naming exactly them — visible as ignored, never
+silently green, and demanded by the guard the moment the marker comes off.
 
 ## N-version verification
 

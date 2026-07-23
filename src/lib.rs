@@ -1461,16 +1461,36 @@ pub fn execute_steps<W>(steps: &[Step], reg: &StepRegistry<W>, world: W) -> Resu
 
 // --- Guards (pure, so tests can drive them without a runner) -------------------
 
+/// How much of a feature's unbound-step ratchet the `wip` register holds open.
+/// Mirrors the node sibling's `WipEntry` shapes: a basename entry is
+/// `Wip::Feature`, a `{ feature, scenarios }` entry is `Wip::Scenarios`.
+#[derive(Clone, Debug)]
+pub enum Wip {
+    /// Not listed: every step must bind.
+    No,
+    /// Whole feature still bootstrapping: unbound steps allowed anywhere —
+    /// and required somewhere (a fully bound feature still listed is stale).
+    Feature,
+    /// Only the named scenarios may have unbound steps, by SOURCE title: a
+    /// plain scenario's name, or an outline's pre-substitution title covering
+    /// every expanded row. The rest of the feature keeps the full ratchet.
+    Scenarios(HashSet<String>),
+}
+
 /// The per-feature binding guard: every step must match exactly one definition
-/// — no ambiguity, and (unless `wip`) no unbound steps, because unbound
-/// scenarios register as ignored, which `cargo test` reports as GREEN. The
-/// failure message includes a paste-ready snippet per missing step. @skip'd
-/// scenarios are ratcheted too: skip means "don't run", never "don't bind".
+/// — no ambiguity, and (unless allowed by `wip`) no unbound steps, because
+/// unbound scenarios register as ignored, which `cargo test` reports as GREEN.
+/// The failure message includes a paste-ready snippet per missing step.
+/// @skip'd scenarios are ratcheted too: skip means "don't run", never "don't
+/// bind". The `wip` register itself is ratcheted both ways: an entry whose
+/// feature (or scenario) has become fully bound FAILS until removed — an
+/// allowlist that could rot silently would hold the ratchet open for nothing —
+/// and a scenario title matching nothing FAILS as stranded.
 pub fn check_bindings<W>(
     parsed: &ParsedFeature,
     reg: &StepRegistry<W>,
     base: &str,
-    wip: bool,
+    wip: &Wip,
 ) -> Result<(), String> {
     let steps: Vec<&Step> = parsed
         .background
@@ -1488,23 +1508,116 @@ pub fn check_bindings<W>(
             ambiguous.join("; ")
         ));
     }
-    if !wip {
+    let unbound = |steps: &[&Step]| -> Vec<String> {
         let mut seen = HashSet::new();
-        let unresolved: Vec<&str> = steps
+        steps
             .iter()
             .filter(|s| reg.find(&s.text).is_none())
-            .map(|s| s.text.as_str())
-            .filter(|t| seen.insert(*t))
-            .collect();
-        if !unresolved.is_empty() {
-            return Err(format!(
-                "unbound steps would register as ignored (reported green); bind them or mark '{base}' as .wip():\n\n{}",
-                unresolved
-                    .iter()
-                    .map(|t| format!("// {t}\n{}", build_snippet(t)))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            ));
+            .map(|s| s.text.clone())
+            .filter(|t| seen.insert(t.clone()))
+            .collect()
+    };
+    match wip {
+        Wip::Feature => {
+            // The staleness half of the ratchet: an allowlist that could rot
+            // silently would hold the unbound-step check open for nothing.
+            if unbound(&steps).is_empty() {
+                return Err(format!(
+                    "'{base}' is fully bound — remove its .wip() entry; it now only holds the unbound-step ratchet open"
+                ));
+            }
+        }
+        Wip::No => {
+            let unresolved = unbound(&steps);
+            if !unresolved.is_empty() {
+                return Err(format!(
+                    "unbound steps would register as ignored (reported green); bind them or mark '{base}' as .wip():\n\n{}",
+                    unresolved
+                        .iter()
+                        .map(|t| format!("// {t}\n{}", build_snippet(t)))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                ));
+            }
+        }
+        Wip::Scenarios(titles) => {
+            // Titles are SOURCE titles; expanded scenarios keep their
+            // outline's source line — the same resolution duplicate_titles
+            // uses, and the duplicate-title rejection is what makes a source
+            // title an unambiguous address here.
+            let outline_by_line: HashMap<usize, &str> = parsed
+                .outlines
+                .iter()
+                .map(|o| (o.line, o.name.as_str()))
+                .collect();
+            fn source_title<'a>(by_line: &HashMap<usize, &'a str>, sc: &'a Scenario) -> &'a str {
+                by_line.get(&sc.line).copied().unwrap_or(sc.name.as_str())
+            }
+            let known: HashSet<&str> = parsed
+                .scenarios
+                .iter()
+                .map(|sc| source_title(&outline_by_line, sc))
+                .collect();
+            let mut unknown: Vec<&String> = titles
+                .iter()
+                .filter(|t| !known.contains(t.as_str()))
+                .collect();
+            unknown.sort();
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "wip scenario titles with no matching Scenario/Scenario Outline in '{base}': {}",
+                    unknown
+                        .iter()
+                        .map(|t| format!("'{t}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            // Background steps belong to every scenario, so they are enforced
+            // exactly as often as an enforced scenario exists to carry them.
+            let enforced_steps: Vec<&Step> = parsed
+                .scenarios
+                .iter()
+                .filter(|sc| !titles.contains(source_title(&outline_by_line, sc)))
+                .flat_map(|sc| parsed.background.iter().chain(sc.steps.iter()))
+                .collect();
+            let unresolved = unbound(&enforced_steps);
+            if !unresolved.is_empty() {
+                return Err(format!(
+                    "unbound steps would register as ignored (reported green); bind them or add their scenarios to '{base}''s wip entry:\n\n{}",
+                    unresolved
+                        .iter()
+                        .map(|t| format!("// {t}\n{}", build_snippet(t)))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                ));
+            }
+            // Per-scenario staleness, same ratchet as the whole-feature form.
+            let mut stale: Vec<&String> = titles
+                .iter()
+                .filter(|t| {
+                    parsed
+                        .scenarios
+                        .iter()
+                        .filter(|sc| source_title(&outline_by_line, sc) == t.as_str())
+                        .all(|sc| {
+                            let steps: Vec<&Step> =
+                                parsed.background.iter().chain(sc.steps.iter()).collect();
+                            unbound(&steps).is_empty()
+                        })
+                })
+                .collect();
+            stale.sort();
+            if !stale.is_empty() {
+                return Err(format!(
+                    "wip scenarios in '{base}' are fully bound — remove them from the wip entry: {}",
+                    stale
+                        .iter()
+                        .map(|t| format!("'{t}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
     }
     Ok(())
@@ -1516,7 +1629,7 @@ fn feature_trials<W: Default + 'static>(
     path: &Path,
     reg: StepRegistry<W>,
     base: &str,
-    wip: bool,
+    wip: Wip,
 ) -> Vec<Trial> {
     let file = path.display().to_string();
     let text = match fs::read_to_string(path) {
@@ -1546,16 +1659,14 @@ fn feature_trials<W: Default + 'static>(
         let parsed = Arc::clone(&parsed);
         let reg = Arc::clone(&reg);
         let base = base.to_string();
+        let mode = match &wip {
+            Wip::Feature => "unambiguous",
+            Wip::Scenarios(_) => "complete outside wip and unambiguous",
+            Wip::No => "complete and unambiguous",
+        };
         trials.push(Trial::test(
-            format!(
-                "{base} :: step definitions are {}",
-                if wip {
-                    "unambiguous"
-                } else {
-                    "complete and unambiguous"
-                }
-            ),
-            move || check_bindings(&parsed, &reg, &base, wip).map_err(Failed::from),
+            format!("{base} :: step definitions are {mode}"),
+            move || check_bindings(&parsed, &reg, &base, &wip).map_err(Failed::from),
         ));
     }
 
@@ -1664,17 +1775,22 @@ fn feature_trials<W: Default + 'static>(
     trials
 }
 
-type EntryBuilder = Box<dyn FnOnce(&Path, bool) -> Vec<Trial>>;
+type EntryBuilder = Box<dyn FnOnce(&Path, Wip) -> Vec<Trial>>;
 
 /// Discover and run every *.feature in a directory, each against its OWN
 /// scoped registry and typed World. Guards registered alongside the scenarios:
 ///
-///  - every `.feature(base, definer)` must name an existing feature file (a
-///    renamed feature can't silently strand its steps);
+///  - every `.feature(base, definer)` — and every `.wip()`/`.wip_scenarios()`
+///    entry — must name an existing feature file (a renamed feature can't
+///    silently strand its steps, or its allowlist entry);
 ///  - within each feature, every step must match exactly one definition — no
-///    ambiguity, and (unless the feature is marked `.wip(base)`) no unbound
-///    steps. The failure message includes a paste-ready snippet per missing
-///    step.
+///    ambiguity, and (unless allowed by `.wip(base)` or
+///    `.wip_scenarios(base, titles)`) no unbound steps. The failure message
+///    includes a paste-ready snippet per missing step;
+///  - the wip register itself is ratcheted: an entry whose feature (or
+///    scenario) has become fully bound FAILS until the entry is removed — an
+///    allowlist that could rot silently would hold the ratchet open for
+///    nothing.
 ///
 /// ```no_run
 /// // tests/features.rs   (Cargo.toml: [[test]] name = "features", harness = false)
@@ -1699,6 +1815,7 @@ pub struct Features {
     dir: PathBuf,
     entries: Vec<(String, EntryBuilder)>,
     wip: HashSet<String>,
+    wip_scenarios: HashMap<String, HashSet<String>>,
 }
 
 impl Features {
@@ -1707,6 +1824,7 @@ impl Features {
             dir: dir.into(),
             entries: Vec::new(),
             wip: HashSet::new(),
+            wip_scenarios: HashMap::new(),
         }
     }
 
@@ -1733,10 +1851,55 @@ impl Features {
         self
     }
 
-    /// Mark a feature as work-in-progress: unbound steps are allowed (its
-    /// scenarios register as ignored instead of failing the binding guard).
+    /// Mark a whole feature as work-in-progress: unbound steps are allowed
+    /// (its scenarios register as ignored instead of failing the binding
+    /// guard). Ratcheted against rot: a fully bound feature still listed
+    /// FAILS the binding guard until the entry is removed. Panics if the
+    /// feature already has a `.wip_scenarios()` entry — the whole-feature
+    /// entry would silently swallow the scenario list (mirrors the node
+    /// sibling's load-time TypeError).
     pub fn wip(mut self, base: &str) -> Self {
+        assert!(
+            !self.wip_scenarios.contains_key(base),
+            "'{base}' is in wip both as a whole feature and per-scenario — the whole-feature \
+             entry would silently swallow the scenario list; keep exactly one of the two"
+        );
         self.wip.insert(base.to_string());
+        self
+    }
+
+    /// Mark specific scenarios of a feature as work-in-progress, by SOURCE
+    /// title (an outline's pre-substitution title covers every expanded row):
+    /// only their unbound steps are allowed; every other scenario in the
+    /// feature keeps the full can't-silently-lose-a-binding ratchet.
+    ///
+    /// Scenario wip means "expected-unbound", never "skip": a listed scenario
+    /// whose steps all happen to be bound runs normally — and trips the
+    /// staleness guard until its entry is removed. Titles matching no
+    /// Scenario/Scenario Outline fail the guard as stranded.
+    ///
+    /// Panics on an empty title list (it claims nothing) or if the feature is
+    /// already `.wip()` whole — mirrors the node sibling's load-time
+    /// TypeError.
+    pub fn wip_scenarios(
+        mut self,
+        base: &str,
+        titles: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        assert!(
+            !self.wip.contains(base),
+            "'{base}' is in wip both as a whole feature and per-scenario — the whole-feature \
+             entry would silently swallow the scenario list; keep exactly one of the two"
+        );
+        let titles: Vec<String> = titles.into_iter().map(Into::into).collect();
+        assert!(
+            !titles.is_empty(),
+            "wip_scenarios('{base}', …) with no titles claims nothing — list the pending scenarios"
+        );
+        self.wip_scenarios
+            .entry(base.to_string())
+            .or_default()
+            .extend(titles);
         self
     }
 
@@ -1762,31 +1925,53 @@ impl Features {
             .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .collect();
 
-        // Orphan guard: a definer whose feature file no longer exists.
+        // Orphan guard: a definer — or a wip entry — whose feature file no
+        // longer exists. Renaming a feature must not silently strand its
+        // steps, nor its allowlist entry.
         let orphaned: Vec<String> = self
             .entries
             .iter()
             .map(|(b, _)| b.clone())
             .filter(|b| !bases.contains(b))
             .collect();
+        let mut wip_orphaned: Vec<String> = self
+            .wip
+            .iter()
+            .chain(self.wip_scenarios.keys())
+            .filter(|b| !bases.contains(b))
+            .cloned()
+            .collect();
+        wip_orphaned.sort();
         let dir = self.dir.display().to_string();
         trials.push(Trial::test(
-            "step definers map only to existing feature files",
+            "step definers and wip entries map only to existing feature files",
             move || {
-                if orphaned.is_empty() {
-                    Ok(())
-                } else {
-                    Err(Failed::from(format!(
+                if !orphaned.is_empty() {
+                    return Err(Failed::from(format!(
                         "definers with no matching .feature in {dir}: {}",
                         orphaned.join(", ")
-                    )))
+                    )));
                 }
+                if !wip_orphaned.is_empty() {
+                    return Err(Failed::from(format!(
+                        "wip entries with no matching .feature in {dir}: {}",
+                        wip_orphaned.join(", ")
+                    )));
+                }
+                Ok(())
             },
         ));
 
         let mut entry_map: HashMap<String, EntryBuilder> = self.entries.into_iter().collect();
+        let mut wip_scenarios = self.wip_scenarios;
         for (path, base) in files.iter().zip(bases.iter()) {
-            let wip = self.wip.contains(base);
+            let wip = if self.wip.contains(base) {
+                Wip::Feature
+            } else if let Some(titles) = wip_scenarios.remove(base) {
+                Wip::Scenarios(titles)
+            } else {
+                Wip::No
+            };
             match entry_map.remove(base) {
                 Some(builder) => trials.extend(builder(path, wip)),
                 // No definer: run against an empty registry — every scenario is
