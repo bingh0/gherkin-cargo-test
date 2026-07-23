@@ -16,6 +16,9 @@
 //   SCENARIO <line> <name>
 //   TAGS <t1> <t2> ...                only when non-empty
 //   STEP <line> <keyword> <text>
+//   OUTLINE <line> <rows> <header_line> <name>  one per source Scenario Outline
+//   OHEADER <c1> <c2> ...             the outline's Examples header columns
+//   OPLACEHOLDERS <p1> ...            referenced placeholder names (may be bare)
 //   NARRATIVE <line> <in_body> <text> a line the parser dropped as narrative
 //
 // With --lint, dumps lint_feature's findings instead (nothing for a clean
@@ -87,6 +90,22 @@ fn main() {
                 for st in &sc.steps {
                     dump_step("STEP", st);
                 }
+            }
+            for o in &p.outlines {
+                println!(
+                    "OUTLINE\t{}\t{}\t{}\t{}",
+                    o.line,
+                    o.rows,
+                    o.header_line,
+                    esc(&o.name)
+                );
+                let header: Vec<String> = o.header.iter().map(|c| esc(c)).collect();
+                println!("OHEADER\t{}", header.join("\t"));
+                // Always emitted, possibly bare: an outline referencing no
+                // placeholders at all is legal (every column then warns
+                // unused), and an unconditional record keeps the dumps aligned.
+                let ph: Vec<String> = o.placeholders.iter().map(|c| esc(c)).collect();
+                println!("OPLACEHOLDERS\t{}", ph.join("\t"));
             }
             for n in &p.narrative {
                 println!("NARRATIVE\t{}\t{}\t{}", n.line, n.in_body, esc(&n.text));

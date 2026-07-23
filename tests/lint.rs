@@ -482,3 +482,171 @@ fn construct_like_prose_without_the_colon_shape_stays_quiet() {
     );
     assert!(findings.is_empty(), "expected none, got {findings:?}");
 }
+
+// --- duplicate-title ---------------------------------------------------------------
+
+#[test]
+fn duplicate_title_is_an_error_naming_both_lines() {
+    let findings = lint_feature(
+        &feat("Scenario: twin\n  Given a\n  Then b\nScenario: twin\n  Given a\n  Then b\n"),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["duplicate-title"]);
+    assert_eq!(findings[0].severity, LintSeverity::Error);
+    assert_eq!(findings[0].line, 5);
+    assert!(findings[0].message.contains("Scenario title \"twin\" repeats line 2's"));
+    assert!(findings[0].message.contains("name-filter selection"));
+}
+
+#[test]
+fn two_outlines_sharing_a_title_are_flagged_pre_expansion() {
+    // Their expanded trial names are byte-identical — the [n] suffix indexes
+    // rows within ONE outline, not across outlines.
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario Outline: adds <a>\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | a |\n    | 1 |\n    | 2 |\n",
+            "Scenario Outline: adds <a>\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | a |\n    | 1 |\n    | 2 |\n",
+        )),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["duplicate-title"]);
+    assert!(findings[0]
+        .message
+        .contains("Scenario Outline title \"adds <a>\" repeats line 2's"));
+}
+
+#[test]
+fn a_scenario_sharing_an_outline_title_collides_too() {
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario Outline: adds\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | a |\n    | 1 |\n    | 2 |\n",
+            "Scenario: adds\n  Given a\n  Then b\n",
+        )),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["duplicate-title"]);
+    assert_eq!(findings[0].line, 9);
+}
+
+#[test]
+fn a_post_expansion_collision_with_an_outline_row_is_caught() {
+    // Source titles differ ("adds <a>" vs "adds 1 [1]") but the REGISTERED
+    // names are byte-identical — the backstop half of duplicate_titles.
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario Outline: adds <a>\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | a |\n    | 1 |\n    | 2 |\n",
+            "Scenario: adds 1 [1]\n  Given a\n  Then b\n",
+        )),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["duplicate-title"]);
+    assert_eq!(findings[0].line, 9);
+    assert!(findings[0].message.contains("\"adds 1 [1]\" repeats line 2's"));
+}
+
+#[test]
+fn distinct_titles_stay_quiet_and_outline_rows_are_not_duplicates() {
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario: one\n  Given a\n  Then b\n",
+            "Scenario Outline: adds <a>\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | a |\n    | 1 |\n    | 2 |\n    | 3 |\n",
+        )),
+        "<feature>",
+    );
+    assert!(findings.is_empty(), "expected none, got {findings:?}");
+}
+
+#[test]
+fn three_copies_produce_two_findings_each_pointing_at_the_first() {
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario: twin\n  Given a\n  Then b\n",
+            "Scenario: twin\n  Given a\n  Then b\n",
+            "Scenario: twin\n  Given a\n  Then b\n",
+        )),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["duplicate-title", "duplicate-title"]);
+    assert_eq!(
+        findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+        [5, 8]
+    );
+    for f in &findings {
+        assert!(f.message.contains("repeats line 2's"));
+    }
+}
+
+// --- unused-column -----------------------------------------------------------------
+
+#[test]
+fn an_unreferenced_examples_column_warns_at_the_header_row() {
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario Outline: adds <a>\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | case | a |\n    | small | 1 |\n    | big | 9 |\n",
+        )),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["unused-column"]);
+    assert_eq!(findings[0].severity, LintSeverity::Warn);
+    assert_eq!(findings[0].line, 6);
+    assert!(findings[0]
+        .message
+        .contains("Examples column \"case\" is never referenced"));
+}
+
+#[test]
+fn references_in_title_steps_and_step_tables_all_count() {
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario Outline: t <title>\n  When I add:\n    | v |\n    | <cell> |\n  Then ok <x>\n",
+            "  Examples:\n    | title | cell | x |\n    | a | b | c |\n    | d | e | f |\n",
+        )),
+        "<feature>",
+    );
+    assert!(findings.is_empty(), "expected none, got {findings:?}");
+}
+
+#[test]
+fn unused_column_fires_once_per_column_not_once_per_row() {
+    let findings = lint_feature(
+        &feat(concat!(
+            "Scenario Outline: adds <a>\n  When I add <a>\n  Then I see <a>\n",
+            "  Examples:\n    | a | spare | extra |\n    | 1 | x | y |\n    | 2 | x | y |\n    | 3 | x | y |\n",
+        )),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["unused-column", "unused-column"]);
+    assert_eq!(
+        findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+        [6, 6]
+    );
+}
+
+// --- no-scenarios (a dialect error, not a separate rule) ---------------------------
+
+#[test]
+fn a_feature_with_no_scenarios_is_a_dialect_error_at_the_feature_line() {
+    let findings = lint_feature(
+        "Feature: Charge voting\n  Ties break toward the lower charge.\n",
+        "v.feature",
+    );
+    assert_eq!(rules(&findings), ["dialect"]);
+    assert_eq!(findings[0].severity, LintSeverity::Error);
+    assert_eq!(findings[0].line, 1);
+    assert!(findings[0].message.contains("has no scenarios"));
+}
+
+#[test]
+fn the_no_scenarios_dialect_finding_names_a_construct_near_miss() {
+    let findings = lint_feature("Feature: F\nscenario: s\n  given a\n  then ok\n", "x.feature");
+    assert_eq!(rules(&findings), ["dialect"]);
+    assert!(findings[0]
+        .message
+        .contains("line 2 \"scenario:\" is not the exact construct keyword \"Scenario:\""));
+}

@@ -44,6 +44,8 @@
 //!   - multiple Examples per Outline       - a step after its Examples table
 //!   - a Scenario/Outline with no steps    - a table row with no preceding step
 //!   - ragged table rows                   - a table row missing its closing |
+//!   - a Feature with no scenarios (a header + narrative registers nothing and
+//!     would read as a passing file)
 //!   - tags anywhere but immediately before Feature:/Scenario:/Scenario Outline:
 //!
 //! Two non-features are NOT special-cased, by design (no dedicated error):
@@ -129,6 +131,15 @@ pub struct OutlineMeta {
     pub name: String,
     pub line: usize,
     pub rows: usize,
+    /// The Examples header row's column names, and its 1-based line.
+    pub header: Vec<String>,
+    pub header_line: usize,
+    /// The placeholder names the outline's source actually references —
+    /// title, step text, and step-table cells, pre-substitution, in
+    /// first-appearance order. Recorded so the linter's unused-column rule
+    /// reads the parser's own account of what was referenced, exactly as
+    /// near-miss-keyword reads its account of what was dropped.
+    pub placeholders: Vec<String>,
 }
 
 /// One line the parser dropped as narrative, recorded at its single
@@ -238,6 +249,7 @@ struct OutlineAcc {
     name: String,
     steps: Vec<Step>,
     header: Option<Vec<String>>,
+    header_line: usize,
     rows: Vec<Vec<String>>,
     examples_seen: bool,
     line: usize,
@@ -321,10 +333,38 @@ fn flush_outline(
             "Scenario Outline Examples: has a header but no data rows",
         ));
     }
+    // Placeholder names referenced by the source, pre-substitution, in
+    // first-appearance order — title first, then step text and table cells in
+    // step order. Mirrors the node sibling's collection exactly.
+    let mut placeholders: Vec<String> = Vec::new();
+    {
+        let mut collect = |s: &str| {
+            for c in placeholder_re().captures_iter(s) {
+                let name = c.get(1).expect("group 1").as_str();
+                if !placeholders.iter().any(|p| p == name) {
+                    placeholders.push(name.to_string());
+                }
+            }
+        };
+        collect(&o.name);
+        for st in &o.steps {
+            collect(&st.text);
+            if let Some(t) = &st.table {
+                for r in t {
+                    for cell in r {
+                        collect(cell);
+                    }
+                }
+            }
+        }
+    }
     outlines.push(OutlineMeta {
         name: o.name.clone(),
         line: o.line,
         rows: o.rows.len(),
+        header: header.clone(),
+        header_line: o.header_line,
+        placeholders,
     });
     for (i, row) in o.rows.iter().enumerate() {
         let map: HashMap<&str, &str> = header
@@ -421,6 +461,7 @@ fn split_row(
 pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, GherkinSyntaxError> {
     let mut feature = String::new();
     let mut feature_seen = false;
+    let mut feature_line = 0;
     let mut background_seen = false;
     let mut background: Vec<Step> = Vec::new();
     let mut scenarios: Vec<Scenario> = Vec::new();
@@ -516,6 +557,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             flush_outline(&mut outline, &mut scenarios, &mut outlines, filename)?;
             feature = rest.trim().to_string();
             feature_seen = true;
+            feature_line = line_no;
             feature_tags = std::mem::take(&mut pending_tags);
             no_tag_conflict(&feature_tags, line_no)?;
             cur = Cur::None;
@@ -546,6 +588,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
                 name: rest.trim().to_string(),
                 steps: Vec::new(),
                 header: None,
+                header_line: 0,
                 rows: Vec::new(),
                 examples_seen: false,
                 line: line_no,
@@ -617,7 +660,10 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             if in_examples {
                 let o = outline.as_mut().expect("in_examples implies outline");
                 match &o.header {
-                    None => o.header = Some(cells),
+                    None => {
+                        o.header = Some(cells);
+                        o.header_line = line_no;
+                    }
                     Some(h) if cells.len() != h.len() => {
                         return Err(fail(
                             line_no,
@@ -689,6 +735,33 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
             ));
         }
     }
+    // A Feature with no scenarios is the same hazard one level up: the file
+    // registers nothing, contributes zero assertions, and reads as a passing
+    // file to every consumer. If a construct near miss is why the file is
+    // empty ("scenario: s"), name it — lint_feature returns early on a
+    // dialect error, so its near-miss scan never runs for this file. Message
+    // text (hint included) is byte-identical to the node sibling: it is part
+    // of the --lint parity contract.
+    if scenarios.is_empty() {
+        let mut hint = String::new();
+        for n in &narrative {
+            if let Some((shown, exact)) = near_miss_construct(&n.text) {
+                if shown != exact {
+                    hint = format!(
+                        " (line {} \"{}\" is not the exact construct keyword \"{}\")",
+                        n.line, shown, exact
+                    );
+                    break;
+                }
+            }
+        }
+        return Err(fail(
+            feature_line,
+            &format!(
+                "Feature \"{feature}\" has no scenarios — the file registers nothing and would read as passing{hint}"
+            ),
+        ));
+    }
     Ok(ParsedFeature {
         feature,
         background,
@@ -709,6 +782,8 @@ pub enum LintRule {
     VagueThen,
     SingleRowOutline,
     NearMissKeyword,
+    DuplicateTitle,
+    UnusedColumn,
 }
 
 impl LintRule {
@@ -719,6 +794,8 @@ impl LintRule {
             LintRule::VagueThen => "vague-then",
             LintRule::SingleRowOutline => "single-row-outline",
             LintRule::NearMissKeyword => "near-miss-keyword",
+            LintRule::DuplicateTitle => "duplicate-title",
+            LintRule::UnusedColumn => "unused-column",
         }
     }
 }
@@ -744,6 +821,80 @@ pub struct LintFinding {
     pub severity: LintSeverity,
     pub line: usize,
     pub message: String,
+}
+
+/// A duplicated construct title, as reported by the linter's duplicate-title
+/// rule and refused by the runner (a failing trial, the @only mechanism) —
+/// shared so the two can never disagree about what counts as a duplicate.
+/// Mirrors the node sibling's duplicateTitles(): source-level titles compared
+/// pre-expansion (two outlines sharing a title expand to byte-identical test
+/// names — the [n] suffix indexes rows within ONE outline), plus a
+/// post-expansion backstop for collisions with source-distinct titles (a
+/// plain scenario literally titled "adds 1 [1]").
+struct DuplicateTitle {
+    kind: &'static str,
+    title: String,
+    line: usize,
+    first_line: usize,
+}
+
+fn duplicate_titles(parsed: &ParsedFeature) -> Vec<DuplicateTitle> {
+    let outline_lines: HashSet<usize> = parsed.outlines.iter().map(|o| o.line).collect();
+    let mut constructs: Vec<(&'static str, &str, usize)> = parsed
+        .scenarios
+        .iter()
+        .filter(|sc| !outline_lines.contains(&sc.line))
+        .map(|sc| ("Scenario", sc.name.as_str(), sc.line))
+        .chain(
+            parsed
+                .outlines
+                .iter()
+                .map(|o| ("Scenario Outline", o.name.as_str(), o.line)),
+        )
+        .collect();
+    constructs.sort_by_key(|(_, _, line)| *line);
+    let mut first_at: HashMap<&str, usize> = HashMap::new();
+    let mut dupes: Vec<DuplicateTitle> = Vec::new();
+    for (kind, title, line) in constructs {
+        match first_at.get(title) {
+            Some(&first) => dupes.push(DuplicateTitle {
+                kind,
+                title: title.to_string(),
+                line,
+                first_line: first,
+            }),
+            None => {
+                first_at.insert(title, line);
+            }
+        }
+    }
+    // Post-expansion backstop — see the doc comment above. Source dupes are
+    // reported with better messages; this pass only adds collisions those
+    // didn't imply. (Rows of one outline can never collide with each other —
+    // the [n] suffix increments per row.)
+    let mut flagged_lines: HashSet<usize> = dupes.iter().map(|d| d.line).collect();
+    let mut name_at: HashMap<&str, usize> = HashMap::new();
+    for sc in &parsed.scenarios {
+        match name_at.get(sc.name.as_str()) {
+            None => {
+                name_at.insert(sc.name.as_str(), sc.line);
+            }
+            Some(&prev) => {
+                if flagged_lines.contains(&sc.line) {
+                    continue;
+                }
+                dupes.push(DuplicateTitle {
+                    kind: "Scenario",
+                    title: sc.name.clone(),
+                    line: sc.line,
+                    first_line: prev,
+                });
+                flagged_lines.insert(sc.line);
+            }
+        }
+    }
+    dupes.sort_by_key(|d| d.line);
+    dupes
 }
 
 /// Words that make a Then assert nothing checkable. Deliberately short —
@@ -893,6 +1044,21 @@ fn step_keyword_exact(lower: &str) -> Option<&'static str> {
 ///    never exists. The step check is scoped to bodies (the Feature narrative
 ///    is prose by design); the construct check is not (the trailing colon is
 ///    syntax-shaped anywhere). `Rule:` is exempt — see near_miss_construct.
+///  - `duplicate-title` (error): a Scenario or Scenario Outline title already
+///    used earlier in the file. Titles are the runner's only handle on a
+///    scenario — the @only rejection prescribes name-filter focus, and a
+///    duplicated title breaks it silently: the filter matches both copies,
+///    and two outlines sharing a title expand to byte-identical trial names
+///    (the [n] suffix indexes rows within one outline, not across outlines).
+///    Compared pre-expansion, with a post-expansion backstop. The runner
+///    refuses the file too (a failing trial, the @only mechanism), which is
+///    why this one is an error.
+///  - `unused-column` (warn): an Examples column no `<placeholder>` in the
+///    outline's title, steps, or step tables ever references — a case someone
+///    wrote down that no assertion consumes. The inverse direction (a
+///    placeholder with no matching column) is already a dialect error.
+///    Reported at the header row's line. Deliberately a warn: a leading label
+///    column (`| case | … |`) kept for the human reader is legitimate style.
 ///
 /// Findings from a Scenario Outline land once per source construct — except a
 /// vagueness introduced BY a placeholder substitution, which lands for exactly
@@ -903,6 +1069,23 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
     // Identical (rule, line, message) triples collapse: expanded outline rows
     // share their source lines, so a row-independent finding lands once while
     // a substitution-dependent one (different message text) lands per row.
+    fn add(
+        findings: &mut Vec<LintFinding>,
+        seen: &mut Seen,
+        rule: LintRule,
+        severity: LintSeverity,
+        line: usize,
+        message: String,
+    ) {
+        if seen.insert((rule, line, message.clone())) {
+            findings.push(LintFinding {
+                rule,
+                severity,
+                line,
+                message,
+            });
+        }
+    }
     fn warn(
         findings: &mut Vec<LintFinding>,
         seen: &mut Seen,
@@ -910,14 +1093,7 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
         line: usize,
         message: String,
     ) {
-        if seen.insert((rule, line, message.clone())) {
-            findings.push(LintFinding {
-                rule,
-                severity: LintSeverity::Warn,
-                line,
-                message,
-            });
-        }
+        add(findings, seen, rule, LintSeverity::Warn, line, message);
     }
     fn check_vague(findings: &mut Vec<LintFinding>, seen: &mut Seen, st: &Step) {
         if let Some(m) = vague_then_re().find(&st.text) {
@@ -1010,6 +1186,41 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
                 ),
             );
         }
+        // unused-column: read off the parser's own record of which placeholder
+        // names the outline's source references (OutlineMeta.placeholders), so
+        // the rule cannot disagree with the substitution that actually ran.
+        for col in &o.header {
+            if !o.placeholders.contains(col) {
+                warn(
+                    &mut findings,
+                    &mut seen,
+                    LintRule::UnusedColumn,
+                    o.header_line,
+                    format!(
+                        "Examples column \"{col}\" is never referenced by Scenario Outline \"{}\" — a case written down that no step or title consumes",
+                        o.name
+                    ),
+                );
+            }
+        }
+    }
+
+    // duplicate-title: an error, not a warn — the runner refuses the file (a
+    // failing trial, the @only mechanism), because a duplicated title breaks
+    // name-filter selection. Message is runner-neutral: finding text is part
+    // of the byte-for-byte parity contract with the node sibling.
+    for d in duplicate_titles(&parsed) {
+        add(
+            &mut findings,
+            &mut seen,
+            LintRule::DuplicateTitle,
+            LintSeverity::Error,
+            d.line,
+            format!(
+                "{} title \"{}\" repeats line {}'s — the title is the runner's only handle on a scenario (name-filter selection, failure reports), and duplicates cannot be told apart",
+                d.kind, d.title, d.first_line
+            ),
+        );
     }
 
     // near-miss-keyword. Walks the narrative lines the parser recorded as it
@@ -1360,6 +1571,29 @@ fn feature_trials<W: Default + 'static>(
         );
         trials.push(Trial::test(
             format!("{base} :: @only is not supported"),
+            move || Err(Failed::from(msg)),
+        ));
+    }
+
+    // Duplicate titles are rejected the same way as @only, and for the same
+    // reason: the @only rejection prescribes focusing one scenario by name
+    // filter, and a duplicated title silently breaks that prescription — the
+    // filter matches every copy, and two outlines sharing a title expand to
+    // byte-identical trial names. Rejection is additive: every scenario below
+    // still registers and runs; nothing narrows. (Mirrors the node sibling;
+    // trial-failure text is runner-specific and not parity-compared.)
+    let dupes = duplicate_titles(&parsed);
+    if !dupes.is_empty() {
+        let list = dupes
+            .iter()
+            .map(|d| format!("\"{}\" (lines {} and {})", d.title, d.first_line, d.line))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let msg = format!(
+            "{file}: duplicate scenario title(s): {list} — the title is how one scenario is focused (`cargo test -- '<name substring>'`) and how failures are reported; rename the copies apart"
+        );
+        trials.push(Trial::test(
+            format!("{base} :: scenario titles must be unique"),
             move || Err(Failed::from(msg)),
         ));
     }

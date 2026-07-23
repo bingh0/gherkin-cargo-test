@@ -50,3 +50,28 @@ node 0.5.0 (`576f974`) vs cargo 0.5.0.
 Remaining AST asymmetry (not a dialect divergence — the dump format omits
 it): node carries `ParsedFeature.file`; this crate does not. `outlines`
 landed here with the linter port, `narrative` with 0.5.0.
+
+Status 2026-07-23 (0.6.0): both dumps gained OUTLINE / OHEADER /
+OPLACEHOLDERS records — OutlineMeta's new header, header_line, and
+placeholders fields (the parse data unused-column reads) are byte-compared
+per outline. The fuzz-valid generator now deliberately produces the 0.6.0
+shapes: reused titles (duplicate-title, including the cross-construct case),
+a zero-scenario variant with an optional near-miss construct line (the
+no-scenarios dialect error, hint text included), and a plain scenario
+colliding with an outline row's expanded name (the post-expansion backstop).
+Run: 144 curated case-modes + 16,000 fuzz cases (4 reject-heavy + 4
+valid-biased seeds), zero divergence, node 0.6.0 vs cargo 0.6.0. One
+3,000-case sweep of the valid fuzzer alone carried 964 unused-column, 578
+duplicate-title (301 via the backstop), 236 no-scenarios (87 with the
+near-miss hint) findings — all identical both sides.
+
+Known accepted asymmetry (recorded 2026-07-23, class pre-dates 0.5.0): the
+parsers' LINE TRIMS differ on JS-vs-Rust whitespace — Rust's char-level trim
+strips NEL (U+0085) and keeps U+FEFF; JS's String.trim does the reverse. A
+NEL- or BOM-edged line can therefore parse as a step on one side and
+narrative on the other, and from 0.6.0 the no-scenarios dialect message can
+differ in hint presence or quoted feature title on such files. The js_ws
+pinning covers the near-miss scans only, deliberately: re-pinning the trim
+itself would touch every line of every parse for a character class no real
+corpus contains. Neither fuzzer alphabet includes NEL/U+FEFF, so parity runs
+stay green; this note is the honest record that the class exists.

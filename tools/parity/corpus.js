@@ -441,4 +441,75 @@ Scenario: s
 Feature: G
 `;
 
+// --- 0.6.0: duplicate-title, unused-column, no-scenarios --------------------------
+A['duplicate-title-plain'] = `Feature: F
+  Scenario: twin
+    Given a
+    Then b
+  Scenario: twin
+    Given a
+    Then b
+`;
+A['duplicate-title-outline-pair'] = `Feature: F
+  Scenario Outline: adds <a>
+    When I add <a>
+    Then I see <a>
+    Examples:
+      | a |
+      | 1 |
+      | 2 |
+  Scenario Outline: adds <a>
+    When I add <a>
+    Then I see <a>
+    Examples:
+      | a |
+      | 1 |
+      | 2 |
+`;
+A['duplicate-title-backstop'] = `Feature: F
+  Scenario Outline: adds <a>
+    When I add <a>
+    Then I see <a>
+    Examples:
+      | a |
+      | 1 |
+      | 2 |
+  Scenario: adds 1 [1]
+    Given a
+    Then b
+`;
+A['unused-column-label'] = `Feature: F
+  Scenario Outline: adds <a>
+    When I add <a>
+    Then I see <a>
+    Examples:
+      | case  | a | expected |
+      | small | 1 | 1        |
+      | big   | 9 | 9        |
+`;
+A['unused-column-table-cell-ref'] = `Feature: F
+  Scenario Outline: rows
+    Given a table
+      | v      |
+      | <cell> |
+    Then ok <x>
+    Examples:
+      | cell | x |
+      | a    | 1 |
+      | b    | 2 |
+`;
+R['no-scenarios-header-narrative'] = `Feature: Charge voting
+  The assigner tallies votes across scans.
+  Ties break toward the lower charge.
+`;
+R['no-scenarios-near-miss-hint'] = `Feature: F
+scenario: s
+  given a
+  then ok
+`;
+R['no-scenarios-background-only'] = `Feature: F
+  Background:
+    Given a
+`;
+
 module.exports = { cases: { ...A, ...R } };

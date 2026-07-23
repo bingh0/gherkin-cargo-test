@@ -17,7 +17,7 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.4"   # or just vendor src/lib.rs; it's one file
+gherkin-cargo-test = "0.6"   # or just vendor src/lib.rs; it's one file
 
 [[test]]
 name = "features"
@@ -365,6 +365,7 @@ these is a `GherkinSyntaxError` with the offending line number:
 | A table row with no preceding step | the data would silently belong to nothing |
 | Unknown `<placeholder>` | almost always a typo; would leak `<name>` into a step |
 | A `Scenario`/`Scenario Outline` with no steps | would run zero assertions and pass vacuously |
+| A `Feature:` with no scenarios | a header plus narrative registers nothing and reads as a passing file — the same vacuous pass, one level up. When a construct near miss emptied the file (`scenario: s`), the error names that line |
 | A step *after* its `Examples:` table | malformed ordering; the step would mis-attach |
 | Tags anywhere but immediately before `Feature:` / `Scenario:` / `Scenario Outline:` | a mis-placed `@skip` would silently not skip |
 | A near-miss semantic tag (`@Skip`, `@SKIP`, `@Only`, …) | would be silently inert |
@@ -391,6 +392,7 @@ different, and each one is deliberate:
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
 | lint findings carry plain strings (`rule`, `severity`); `filename` defaults to `<feature>` | **`LintRule` / `LintSeverity` enums** with `as_str()`; `filename` is explicit | the compiler exhaustiveness-checks rule matches that JS can't; the *string forms and finding text* are identical both sides, held together by `tools/parity` |
+| `bindRunner(testFn)` + a `gherkin-node-test/vitest` adapter entry | **no analog** | node-only by nature: it rebinds registration onto a foreign JS runner's `test()`. The dialect and lint surface stay in lockstep; runner *hosting* is each sibling's own business |
 
 ## The linter role — under someone else's runner
 
@@ -411,6 +413,8 @@ Findings carry `rule` / `severity` / `line` / `message`:
 | `vague-then` | warn | a `Then`-resolved step containing *works · correctly · properly · as expected · handles · appropriate* — words that assert nothing checkable |
 | `single-row-outline` | warn | a `Scenario Outline` with one `Examples` row — a scenario with extra ceremony, and usually a missing case |
 | `near-miss-keyword` | warn | a silently dropped line that was almost certainly meant as syntax: a wrong-case step keyword inside a scenario or `Background` body (`when I add 5`, `GIVEN a counter`), or — anywhere — a construct header that isn't the one exact form the parser recognizes (`scenario: b`, `Scenario : b`, `SCENARIO OUTLINE: b`) |
+| `duplicate-title` | error | a `Scenario` or `Scenario Outline` title already used earlier in the file — compared pre-expansion, because two outlines sharing a title expand to **byte-identical** trial names (the `[n]` suffix indexes rows within one outline, not across outlines); a post-expansion backstop catches source-distinct collisions (`adds 1 [1]`). An error because the runner refuses it too: a failing trial (the `@only` mechanism, additive — both copies still run), since a duplicated title silently breaks `cargo test -- '<substring>'` focus |
+| `unused-column` | warn | an `Examples` column no `<placeholder>` in the outline's title, steps, or step tables ever references — a case someone wrote down that no assertion consumes. Reported at the header row's line; a warn because a leading label column kept for the human reader is legitimate style |
 
 `near-miss-keyword` is the counterpart to the near-miss *tag* the parser
 already rejects outright (`@Skip`, `@Only`): keywords are exact, and anything
@@ -425,10 +429,12 @@ itself a `dialect` error in this subset, so a near miss is not a rescue.
 
 Severity is descriptive, not policy: the wip-style debt register (filter by
 rule) belongs in your guard test. Finding **text** is identical to
-gherkin-node-test 0.5.0's `lintFeature` — the two linters are held together
+gherkin-node-test 0.6.0's `lintFeature` — the two linters are held together
 differentially by `tools/parity` (byte-for-byte finding streams over shared
 corpora and fuzzing), so a feature corpus linted here means the same thing
-linted there.
+linted there. That is also why the `duplicate-title` message says
+"name-filter selection" rather than naming either runner's flag: the message
+is shared verbatim across siblings whose flags differ.
 
 ## When *not* to use this
 

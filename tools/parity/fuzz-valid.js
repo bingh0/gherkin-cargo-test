@@ -28,6 +28,16 @@ const text = (n) => Array.from({ length: 1 + int(n) }, () => pick(words)).join('
 
 function gen() {
   const L = [];
+  // Titles seen this file: reused deliberately (maybe 0.12) so duplicate-title
+  // — including its cross-construct and repeated-copy shapes — is generated on
+  // purpose, not only by small-pool collisions.
+  const titles = [];
+  const title = () => {
+    if (titles.length && maybe(0.12)) return pick(titles);
+    const t = text(2);
+    titles.push(t);
+    return t;
+  };
   const phs = ['n', 'x'].slice(0, 1 + int(2));
   const ph = () => `<${pick(phs)}>`;
   const cell = (allowPh) => (allowPh && maybe(0.3) ? ph() : pick(cells));
@@ -60,11 +70,18 @@ function gen() {
   if (maybe(0.4)) { L.push(`  As a ${text(1)}`); L.push(`  I want ${text(2)}`); }
   blank();
   if (maybe(0.35)) { L.push('  Background:'); steps(false, true); blank(); }
-  for (let s = 0; s < 1 + int(3); s++) {
+  // maybe(0.06): a Feature with ZERO scenarios — the no-scenarios dialect
+  // error, whose message (near-miss hint included) is lint-parity-compared.
+  const nScen = maybe(0.06) ? 0 : 1 + int(3);
+  let lastOutlineTitle = null;
+  if (nScen === 0 && maybe(0.5)) L.push(`  ${pick(['scenario: s', 'Scenario : s', 'SCENARIO OUTLINE: s', 'background :'])}`);
+  for (let s = 0; s < nScen; s++) {
     comment();
     if (maybe(0.4)) {
       if (maybe(0.5)) tagLine();
-      L.push(`  Scenario Outline: ${text(2)}${maybe(0.5) ? ' ' + ph() : ''}`);
+      const oTitle = title();
+      lastOutlineTitle = maybe(0.5) ? null : oTitle; // null when a placeholder follows
+      L.push(`  Scenario Outline: ${oTitle}${lastOutlineTitle === null ? ' ' + ph() : ''}`);
       steps(true, true);
       L.push('    Examples:');
       comment();
@@ -72,9 +89,17 @@ function gen() {
       for (let r = 0; r < 1 + int(3); r++) L.push(rowOf(phs.length, false));
     } else {
       if (maybe(0.5)) tagLine();
-      L.push(`  Scenario: ${text(2)}`);
+      L.push(`  Scenario: ${title()}`);
       steps(maybe(0.2), true); // plain scenario: <n> is literal text, still legal
     }
+    blank();
+  }
+  // maybe(0.35), when the last outline title had no placeholder: a plain
+  // scenario whose title collides with an outline row's
+  // expanded name — the duplicate-title post-expansion backstop.
+  if (lastOutlineTitle && maybe(0.35)) {
+    L.push(`  Scenario: ${lastOutlineTitle} [1]`);
+    L.push(`    ${pick(kw)} ${text(3)}`);
     blank();
   }
   const eol = maybe(0.15) ? '\r\n' : '\n';
@@ -95,6 +120,11 @@ const nodeDump = (raw, name) => {
       out.push(`SCENARIO\t${sc.line}\t${esc(sc.name)}`);
       if (sc.tags.length) out.push(`TAGS\t${sc.tags.map(esc).join('\t')}`);
       for (const st of sc.steps) step('STEP', st);
+    }
+    for (const o of p.outlines) {
+      out.push(`OUTLINE\t${o.line}\t${o.rows}\t${o.headerLine}\t${esc(o.name)}`);
+      out.push(`OHEADER\t${o.header.map(esc).join('\t')}`);
+      out.push(`OPLACEHOLDERS\t${o.placeholders.map(esc).join('\t')}`);
     }
     for (const n of p.narrative) out.push(`NARRATIVE\t${n.line}\t${n.inBody}\t${esc(n.text)}`);
     return out.join('\n');

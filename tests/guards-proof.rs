@@ -245,6 +245,32 @@ fn main() {
         0,
     );
 
+    // Duplicate titles: rejected the @only way — a failing trial, additive
+    // (both copies still register and PASS). The rejection exists because a
+    // duplicated title silently breaks name-filter focus: the filter matches
+    // every copy (mirrors gherkin-node-test's duptitle fixture).
+    check(
+        &mut failures,
+        "duptitle",
+        run(Features::new("tests/fixtures/duptitle").feature("twins", value_steps)),
+        4, // orphan + binding + BOTH twin scenarios
+        1, // the duplicate-title rejection trial
+        0,
+    );
+
+    // A Feature with no scenarios (header + narrative) is a parse error, so
+    // it fails as the feature's "parses" trial — a file that registers
+    // nothing must never read as passing.
+    check(
+        &mut failures,
+        "noscenarios",
+        run(Features::new("tests/fixtures/noscenarios")
+            .feature("header-only", |_reg: &mut StepRegistry<World>| {})),
+        1, // orphan guard
+        1, // header-only :: parses
+        0,
+    );
+
     // A parse error fails as its own trial WITHOUT silencing sibling features.
     check(
         &mut failures,

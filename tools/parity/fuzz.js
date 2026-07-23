@@ -81,6 +81,11 @@ const nodeDump = (raw, name) => {
       if (sc.tags.length) out.push(`TAGS\t${sc.tags.map(esc).join('\t')}`);
       for (const st of sc.steps) step('STEP', st);
     }
+    for (const o of p.outlines) {
+      out.push(`OUTLINE\t${o.line}\t${o.rows}\t${o.headerLine}\t${esc(o.name)}`);
+      out.push(`OHEADER\t${o.header.map(esc).join('\t')}`);
+      out.push(`OPLACEHOLDERS\t${o.placeholders.map(esc).join('\t')}`);
+    }
     for (const n of p.narrative) out.push(`NARRATIVE\t${n.line}\t${n.inBody}\t${esc(n.text)}`);
     return out.join('\n');
   } catch (e) {

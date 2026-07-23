@@ -733,3 +733,64 @@ fn binding_guard_checks_background_and_skip_scenarios_too() {
         "skip means don't run, never don't bind: {e}"
     );
 }
+
+// --- 0.6.0: Feature with no scenarios --------------------------------------------
+
+#[test]
+fn a_feature_with_no_scenarios_is_rejected_at_the_feature_line() {
+    // A header + narrative registers nothing: zero trials, zero assertions,
+    // and a green run. Same hazard as a scenario with no steps, one level up.
+    assert_rejects(
+        "Feature: Charge voting\n  Ties break toward the lower charge.\n",
+        1,
+        "Feature \"Charge voting\" has no scenarios",
+    );
+}
+
+#[test]
+fn the_no_scenarios_error_names_a_construct_near_miss_when_one_emptied_the_file() {
+    // lint_feature returns early on a dialect error, so its near-miss scan
+    // never runs for this file — the hint keeps the diagnostic from being
+    // masked.
+    let e = err_of("Feature: F\nscenario: s\n  given a\n  then ok\n");
+    assert!(
+        e.to_string()
+            .contains("(line 2 \"scenario:\" is not the exact construct keyword \"Scenario:\")"),
+        "missing hint: {e}"
+    );
+}
+
+#[test]
+fn a_background_alone_does_not_count_as_a_scenario() {
+    assert_rejects("Feature: F\nBackground:\n  Given a\n", 1, "has no scenarios");
+}
+
+#[test]
+fn a_skip_only_scenario_still_counts_skip_is_not_absence() {
+    let p = parse_feature("Feature: F\n@skip\nScenario: s\n  Given a\n  Then b\n", "t.feature")
+        .expect("parses");
+    assert_eq!(p.scenarios.len(), 1);
+}
+
+// --- 0.6.0: OutlineMeta records header, header_line, placeholders -----------------
+
+#[test]
+fn outline_meta_records_header_line_and_referenced_placeholders() {
+    let p = parse_feature(
+        concat!(
+            "Feature: F\nScenario Outline: t <title>\n  When I add:\n    | v |\n    | <cell> |\n",
+            "  Then ok <x>\n  Examples:\n    | title | cell | x | spare |\n    | a | b | c | d |\n    | e | f | g | h |\n",
+        ),
+        "t.feature",
+    )
+    .expect("parses");
+    assert_eq!(p.outlines.len(), 1);
+    let o = &p.outlines[0];
+    assert_eq!(o.name, "t <title>");
+    assert_eq!(o.line, 2);
+    assert_eq!(o.rows, 2);
+    assert_eq!(o.header, vec!["title", "cell", "x", "spare"]);
+    assert_eq!(o.header_line, 8);
+    // First-appearance order: title, then step text/tables in step order.
+    assert_eq!(o.placeholders, vec!["title", "cell", "x"]);
+}
