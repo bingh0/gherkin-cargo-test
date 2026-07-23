@@ -3,7 +3,7 @@
 **The smallest honest Gherkin runner for Rust.** Two boring dependencies, no
 proc macros, no async, no framework — it turns `.feature` files into real
 `cargo test` tests (one per scenario, via [libtest-mimic]), and it treats
-every silence as a bug. One file, ~1,400 lines, small enough to read in one
+every silence as a bug. One file, ~2,000 lines, small enough to read in one
 sitting or to vendor outright. The same file doubles as a **feature-file
 linter** for projects whose runner is something else — see
 [the linter role](#the-linter-role--under-someone-elses-runner).
@@ -17,7 +17,7 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.6"   # or just vendor src/lib.rs; it's one file
+gherkin-cargo-test = "0.7"   # or just vendor src/lib.rs; it's one file
 
 [[test]]
 name = "features"
@@ -465,7 +465,7 @@ itself a `dialect` error in this subset, so a near miss is not a rescue.
 
 Severity is descriptive, not policy: the wip-style debt register (filter by
 rule) belongs in your guard test. Finding **text** is identical to
-gherkin-node-test 0.6.0's `lintFeature` — the two linters are held together
+gherkin-node-test 0.7.0's `lintFeature` — the two linters are held together
 differentially by `tools/parity` (byte-for-byte finding streams over shared
 corpora and fuzzing), so a feature corpus linted here means the same thing
 linted there. That is also why the `duplicate-title` message says
