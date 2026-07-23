@@ -762,13 +762,20 @@ fn the_no_scenarios_error_names_a_construct_near_miss_when_one_emptied_the_file(
 
 #[test]
 fn a_background_alone_does_not_count_as_a_scenario() {
-    assert_rejects("Feature: F\nBackground:\n  Given a\n", 1, "has no scenarios");
+    assert_rejects(
+        "Feature: F\nBackground:\n  Given a\n",
+        1,
+        "has no scenarios",
+    );
 }
 
 #[test]
 fn a_skip_only_scenario_still_counts_skip_is_not_absence() {
-    let p = parse_feature("Feature: F\n@skip\nScenario: s\n  Given a\n  Then b\n", "t.feature")
-        .expect("parses");
+    let p = parse_feature(
+        "Feature: F\n@skip\nScenario: s\n  Given a\n  Then b\n",
+        "t.feature",
+    )
+    .expect("parses");
     assert_eq!(p.scenarios.len(), 1);
 }
 

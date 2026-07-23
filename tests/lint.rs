@@ -494,7 +494,9 @@ fn duplicate_title_is_an_error_naming_both_lines() {
     assert_eq!(rules(&findings), ["duplicate-title"]);
     assert_eq!(findings[0].severity, LintSeverity::Error);
     assert_eq!(findings[0].line, 5);
-    assert!(findings[0].message.contains("Scenario title \"twin\" repeats line 2's"));
+    assert!(findings[0]
+        .message
+        .contains("Scenario title \"twin\" repeats line 2's"));
     assert!(findings[0].message.contains("name-filter selection"));
 }
 
@@ -545,7 +547,9 @@ fn a_post_expansion_collision_with_an_outline_row_is_caught() {
     );
     assert_eq!(rules(&findings), ["duplicate-title"]);
     assert_eq!(findings[0].line, 9);
-    assert!(findings[0].message.contains("\"adds 1 [1]\" repeats line 2's"));
+    assert!(findings[0]
+        .message
+        .contains("\"adds 1 [1]\" repeats line 2's"));
 }
 
 #[test]
@@ -572,10 +576,7 @@ fn three_copies_produce_two_findings_each_pointing_at_the_first() {
         "<feature>",
     );
     assert_eq!(rules(&findings), ["duplicate-title", "duplicate-title"]);
-    assert_eq!(
-        findings.iter().map(|f| f.line).collect::<Vec<_>>(),
-        [5, 8]
-    );
+    assert_eq!(findings.iter().map(|f| f.line).collect::<Vec<_>>(), [5, 8]);
     for f in &findings {
         assert!(f.message.contains("repeats line 2's"));
     }
@@ -622,10 +623,7 @@ fn unused_column_fires_once_per_column_not_once_per_row() {
         "<feature>",
     );
     assert_eq!(rules(&findings), ["unused-column", "unused-column"]);
-    assert_eq!(
-        findings.iter().map(|f| f.line).collect::<Vec<_>>(),
-        [6, 6]
-    );
+    assert_eq!(findings.iter().map(|f| f.line).collect::<Vec<_>>(), [6, 6]);
 }
 
 // --- no-scenarios (a dialect error, not a separate rule) ---------------------------
@@ -644,7 +642,10 @@ fn a_feature_with_no_scenarios_is_a_dialect_error_at_the_feature_line() {
 
 #[test]
 fn the_no_scenarios_dialect_finding_names_a_construct_near_miss() {
-    let findings = lint_feature("Feature: F\nscenario: s\n  given a\n  then ok\n", "x.feature");
+    let findings = lint_feature(
+        "Feature: F\nscenario: s\n  given a\n  then ok\n",
+        "x.feature",
+    );
     assert_eq!(rules(&findings), ["dialect"]);
     assert!(findings[0]
         .message
