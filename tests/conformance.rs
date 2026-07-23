@@ -741,9 +741,9 @@ fn a_feature_with_no_scenarios_is_rejected_at_the_feature_line() {
     // A header + narrative registers nothing: zero trials, zero assertions,
     // and a green run. Same hazard as a scenario with no steps, one level up.
     assert_rejects(
-        "Feature: Charge voting\n  Ties break toward the lower charge.\n",
+        "Feature: Overdraft alerts\n  Alerts go out before the close of day.\n",
         1,
-        "Feature \"Charge voting\" has no scenarios",
+        "Feature \"Overdraft alerts\" has no scenarios",
     );
 }
 

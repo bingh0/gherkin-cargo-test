@@ -498,9 +498,9 @@ A['unused-column-table-cell-ref'] = `Feature: F
       | a    | 1 |
       | b    | 2 |
 `;
-R['no-scenarios-header-narrative'] = `Feature: Charge voting
-  The assigner tallies votes across scans.
-  Ties break toward the lower charge.
+R['no-scenarios-header-narrative'] = `Feature: Overdraft alerts
+  The ledger flags any account below zero.
+  Alerts go out before the close of day.
 `;
 R['no-scenarios-near-miss-hint'] = `Feature: F
 scenario: s

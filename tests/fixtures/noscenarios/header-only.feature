@@ -1,5 +1,5 @@
-Feature: Charge voting
-  The assigner tallies votes across scans.
-  Ties break toward the lower charge.
+Feature: Overdraft alerts
+  The ledger flags any account below zero.
+  Alerts go out before the close of day.
 
-  # Scenarios to be written once the calibration fixtures land.
+  # Scenarios to be written once the ledger fixtures land.

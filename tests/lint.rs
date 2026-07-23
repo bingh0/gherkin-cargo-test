@@ -631,7 +631,7 @@ fn unused_column_fires_once_per_column_not_once_per_row() {
 #[test]
 fn a_feature_with_no_scenarios_is_a_dialect_error_at_the_feature_line() {
     let findings = lint_feature(
-        "Feature: Charge voting\n  Ties break toward the lower charge.\n",
+        "Feature: Overdraft alerts\n  Alerts go out before the close of day.\n",
         "v.feature",
     );
     assert_eq!(rules(&findings), ["dialect"]);
