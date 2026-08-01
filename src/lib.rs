@@ -15,6 +15,9 @@
 //! (which would otherwise register as ignored — reported GREEN by the runner),
 //! and on definer keys that match no feature file. A feature still being
 //! bootstrapped opts out of the unbound-step ratchet by name via `.wip(base)`.
+//! `.manifest(path)` opts into the run manifest — a committed record of what
+//! ran, one sorted `{file, title, status}` row per scenario (see
+//! `ManifestRecorder`), byte-compatible with the node sibling's.
 //!
 //! SUPPORTED grammar (the practical core, guarded loudly):
 //!   Feature:            one per file, required
@@ -68,7 +71,7 @@ use std::fmt;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use regex::Regex;
@@ -1459,6 +1462,169 @@ pub fn execute_steps<W>(steps: &[Step], reg: &StepRegistry<W>, world: W) -> Resu
     }
 }
 
+// --- Run manifest -------------------------------------------------------------
+
+/// Serialize a string as a JSON string literal, matching `JSON.stringify`
+/// byte-for-byte — the parity contract with the node sibling's manifest
+/// writer: `"` and `\` escaped, the five short escapes (\b \t \n \f \r),
+/// every other C0 control as lowercase `\u00xx`, and everything else —
+/// including non-ASCII — as raw UTF-8. DEL (0x7f) and U+2028/U+2029 stay raw,
+/// exactly as JSON.stringify leaves them.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+struct ManifestState {
+    /// (file, title, status) — sorted at write time. Tuple `Ord` on `String`
+    /// is byte order, which for valid UTF-8 IS code-point order — the sort
+    /// the parity contract pins (the node sibling implements code-point
+    /// comparison explicitly, against JS's native UTF-16 code-unit order).
+    rows: Vec<(String, String, &'static str)>,
+    /// Wrapped scenario trials whose outcome has not been recorded yet.
+    pending: usize,
+    /// Set by `done()` once every row source is known (end of build_trials).
+    registered: bool,
+    /// A feature failed to read or parse: the account cannot be complete, so
+    /// nothing is ever written — the node sibling reaches the same end by
+    /// refusing at load (validate-everything-first); here per-feature parse
+    /// failures are failing trials, so the writer disables itself instead.
+    disabled: bool,
+}
+
+/// The recorder behind `Features::manifest()`: a written account of what ran
+/// — every registered scenario as one `{file, title, status}` NDJSON row —
+/// so a downstream reader can notice what DIDN'T run. Mirrors the node
+/// sibling's `createManifestWriter`; the determinism rules are the parity
+/// contract:
+///
+///  - No timestamps, no durations — the manifest's bytes change only when
+///    results change; dating comes from the commit that touches it.
+///  - Rows sort by (file, title, status) in code-point order and serialize
+///    with fixed key order; `\` in paths normalizes to `/` so the same run
+///    writes the same bytes on every platform.
+///  - `@skip` / `@todo` / unbound are recorded at REGISTRATION, never from
+///    body execution: gct's ignored trials have live bodies that
+///    `--include-ignored` executes, and `@todo` trials run on every
+///    invocation — statuses must not depend on run mode (a normal run and an
+///    `--include-ignored` run write identical bytes). Only a plain bound
+///    scenario records from execution: passed or failed.
+///  - The file is written exactly ONCE, when every wrapped trial's outcome
+///    has been observed. A name-filtered, `--list`, or `--ignored` run
+///    leaves `pending > 0` and never writes — a partial account must not
+///    overwrite a full one. Zero rows write a ZERO-BYTE file (visibly empty
+///    is an account; an absent file would read as "never ran").
+///  - A write failure surfaces as the completing trial's failure — unless
+///    that trial's own scenario failed, which outranks it (the same
+///    precedence `execute_steps` gives step failures over cleanup panics).
+///
+/// The node sibling's re-invocation refusal (vitest retry/repeats) has no
+/// code here: libtest-mimic invokes each trial closure at most once, so the
+/// hazard is structurally unreachable in-process. Its cross-process cousin —
+/// nextest's one-test-per-process model — is refused at build time instead
+/// (see `Features::build_trials`).
+struct ManifestRecorder {
+    path: PathBuf,
+    state: Mutex<ManifestState>,
+}
+
+impl ManifestRecorder {
+    fn new(path: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            state: Mutex::new(ManifestState {
+                rows: Vec::new(),
+                pending: 0,
+                registered: false,
+                disabled: false,
+            }),
+        })
+    }
+
+    fn norm(file: &str) -> String {
+        file.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
+    /// Record a status known at registration time (@skip / @todo / unbound).
+    fn record_static(&self, file: &str, title: &str, status: &'static str) {
+        let mut st = self.state.lock().unwrap();
+        st.rows.push((Self::norm(file), title.to_string(), status));
+    }
+
+    /// Reserve a slot for a plain bound scenario trial (called at build).
+    fn begin_trial(&self) {
+        self.state.lock().unwrap().pending += 1;
+    }
+
+    /// Record a wrapped trial's outcome; the last one to land writes. The
+    /// returned error is the write failure, for the caller to rank against
+    /// the scenario's own result.
+    fn finish_trial(&self, file: &str, title: &str, status: &'static str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        st.rows.push((Self::norm(file), title.to_string(), status));
+        st.pending -= 1;
+        self.maybe_write(&mut st)
+    }
+
+    /// Every registration has happened; write now if nothing is pending.
+    fn done(&self) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        st.registered = true;
+        self.maybe_write(&mut st)
+    }
+
+    /// The account cannot be complete (a feature failed to read or parse):
+    /// never write.
+    fn disable(&self) {
+        self.state.lock().unwrap().disabled = true;
+    }
+
+    fn maybe_write(&self, st: &mut ManifestState) -> Result<(), String> {
+        if st.disabled || !st.registered || st.pending > 0 {
+            return Ok(());
+        }
+        let mut rows = st.rows.clone();
+        rows.sort();
+        let text = if rows.is_empty() {
+            String::new()
+        } else {
+            let mut t = rows
+                .iter()
+                .map(|(file, title, status)| {
+                    format!(
+                        "{{\"file\":{},\"title\":{},\"status\":{}}}",
+                        json_string(file),
+                        json_string(title),
+                        json_string(status)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            t.push('\n');
+            t
+        };
+        fs::write(&self.path, text)
+            .map_err(|e| format!("run manifest: cannot write {}: {e}", self.path.display()))
+    }
+}
+
 // --- Guards (pure, so tests can drive them without a runner) -------------------
 
 /// How much of a feature's unbound-step ratchet the `wip` register holds open.
@@ -1630,11 +1796,18 @@ fn feature_trials<W: Default + 'static>(
     reg: StepRegistry<W>,
     base: &str,
     wip: Wip,
+    recorder: Option<Arc<ManifestRecorder>>,
 ) -> Vec<Trial> {
     let file = path.display().to_string();
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
+            // The manifest's account cannot be complete without this
+            // feature's rows — never write one that omits them (the node
+            // sibling reaches the same end by refusing at load).
+            if let Some(r) = &recorder {
+                r.disable();
+            }
             let msg = format!("cannot read {file}: {e}");
             return vec![Trial::test(format!("{base} :: parses"), move || {
                 Err(Failed::from(msg))
@@ -1644,6 +1817,9 @@ fn feature_trials<W: Default + 'static>(
     let parsed = match parse_feature(&text, &file) {
         Ok(p) => p,
         Err(e) => {
+            if let Some(r) = &recorder {
+                r.disable();
+            }
             let msg = e.to_string();
             return vec![Trial::test(format!("{base} :: parses"), move || {
                 Err(Failed::from(msg))
@@ -1733,6 +1909,9 @@ fn feature_trials<W: Default + 'static>(
                 missing.len(),
                 missing[0]
             );
+            if let Some(r) = &recorder {
+                r.record_static(&file, &sc.name, "unbound");
+            }
             trials.push(
                 Trial::test(title, move || Err(Failed::from(reason)))
                     .with_kind("unbound")
@@ -1740,7 +1919,15 @@ fn feature_trials<W: Default + 'static>(
             );
             continue;
         }
+        // Manifest statuses for @skip and @todo come from the TAG, never the
+        // body — these trials' bodies run in some modes and not others
+        // (`--include-ignored` executes a parked @skip body; @todo runs every
+        // time), and a status that varied by run mode would break the
+        // bytes-follow-results rule. See ManifestRecorder.
         if sc.tags.iter().any(|t| t == "@skip") {
+            if let Some(r) = &recorder {
+                r.record_static(&file, &sc.name, "skipped");
+            }
             let reg = Arc::clone(&reg);
             trials.push(
                 Trial::test(title, move || {
@@ -1754,17 +1941,42 @@ fn feature_trials<W: Default + 'static>(
             continue;
         }
         let todo = sc.tags.iter().any(|t| t == "@todo");
+        if todo {
+            if let Some(r) = &recorder {
+                r.record_static(&file, &sc.name, "todo");
+            }
+        }
         let reg = Arc::clone(&reg);
         let file = file.clone();
         let trial_title = title.clone();
+        // Only a plain bound scenario records from execution. Its slot is
+        // reserved at build; the last slot to land writes the manifest, and a
+        // write failure surfaces as that trial's failure unless the scenario
+        // itself failed (which outranks it).
+        let trial_recorder = if todo { None } else { recorder.clone() };
+        if let Some(r) = &trial_recorder {
+            r.begin_trial();
+        }
+        let scenario_name = sc.name.clone();
         let mut trial = Trial::test(title, move || {
             match execute_steps(&steps, &reg, W::default()) {
-                Ok(_) => Ok(()),
+                Ok(_) => {
+                    if let Some(r) = &trial_recorder {
+                        r.finish_trial(&file, &scenario_name, "passed")
+                            .map_err(Failed::from)?;
+                    }
+                    Ok(())
+                }
                 Err(e) if todo => {
                     eprintln!("(@todo, failure tolerated) {trial_title}: {e}");
                     Ok(())
                 }
-                Err(e) => Err(Failed::from(format!("{e}\n  in {file}"))),
+                Err(e) => {
+                    if let Some(r) = &trial_recorder {
+                        let _ = r.finish_trial(&file, &scenario_name, "failed");
+                    }
+                    Err(Failed::from(format!("{e}\n  in {file}")))
+                }
             }
         });
         if todo {
@@ -1775,7 +1987,7 @@ fn feature_trials<W: Default + 'static>(
     trials
 }
 
-type EntryBuilder = Box<dyn FnOnce(&Path, Wip) -> Vec<Trial>>;
+type EntryBuilder = Box<dyn FnOnce(&Path, Wip, Option<Arc<ManifestRecorder>>) -> Vec<Trial>>;
 
 /// Discover and run every *.feature in a directory, each against its OWN
 /// scoped registry and typed World. Guards registered alongside the scenarios:
@@ -1816,6 +2028,7 @@ pub struct Features {
     entries: Vec<(String, EntryBuilder)>,
     wip: HashSet<String>,
     wip_scenarios: HashMap<String, HashSet<String>>,
+    manifest: Option<PathBuf>,
 }
 
 impl Features {
@@ -1825,7 +2038,33 @@ impl Features {
             entries: Vec::new(),
             wip: HashSet::new(),
             wip_scenarios: HashMap::new(),
+            manifest: None,
         }
+    }
+
+    /// Opt into the run manifest: a committed record of what ran, one sorted
+    /// `{file, title, status}` NDJSON row per registered scenario, written
+    /// only when the full run has been observed — so a downstream reader can
+    /// notice what DIDN'T run. See `ManifestRecorder` for the format and
+    /// determinism rules (the parity contract with the node sibling's
+    /// `runFeatures(..., { manifest })`).
+    ///
+    /// One manifest per runner — one per feature directory. The path's
+    /// directory must exist (the writer never creates directories — a write
+    /// failure is loud). Under cargo-nextest the manifest is refused loudly
+    /// at build time: nextest runs one test per process, so no process ever
+    /// observes the full run (see `build_trials`).
+    ///
+    /// Panics on an empty path — `""` must not silently mean "no manifest"
+    /// (mirrors the node sibling's load-time TypeError).
+    pub fn manifest(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        assert!(
+            !path.as_os_str().is_empty(),
+            "manifest path must be a non-empty file path — \"\" must not silently mean \"no manifest\""
+        );
+        self.manifest = Some(path);
+        self
     }
 
     /// Bind a feature basename to its step definer. The definer runs against a
@@ -1842,10 +2081,10 @@ impl Features {
         let base_owned = base.to_string();
         self.entries.push((
             base.to_string(),
-            Box::new(move |path, wip| {
+            Box::new(move |path, wip, recorder| {
                 let mut reg = StepRegistry::new();
                 definer(&mut reg);
-                feature_trials(path, reg, &base_owned, wip)
+                feature_trials(path, reg, &base_owned, wip, recorder)
             }),
         ));
         self
@@ -1920,6 +2159,40 @@ impl Features {
             }
         };
         files.sort();
+
+        // The run manifest requires one process to observe every scenario's
+        // outcome; cargo-nextest runs one test per process, so no process
+        // ever can — the manifest would silently never be written, exactly
+        // the class it exists to expose. Refused the @only way: ONE
+        // registered failing trial naming the fix, additive — every scenario
+        // below still registers and runs (under nextest, each in its own
+        // process, so exactly one test in the suite goes red). Detection is
+        // nextest's documented env vars; the honest limit on the label: an
+        // unknown process-per-test runner without them falls back to
+        // silently-never-written, which write-on-complete at least keeps
+        // partial-free.
+        let nextest = std::env::var_os("NEXTEST").is_some()
+            || std::env::var_os("NEXTEST_EXECUTION_MODE").is_some();
+        let recorder = match &self.manifest {
+            Some(path) if nextest => {
+                let path = path.display().to_string();
+                trials.push(Trial::test(
+                    "run manifest: requires a single-process full run",
+                    move || {
+                        Err(Failed::from(format!(
+                            "the run manifest ({path}) is written only when one process observes \
+                             every scenario's outcome; nextest runs one test per process, so no \
+                             process ever can. Run the manifest lane under `cargo test` (e.g. \
+                             `cargo test --test features`), or drop the .manifest() opt-in for \
+                             nextest runs."
+                        )))
+                    },
+                ));
+                None
+            }
+            Some(path) => Some(ManifestRecorder::new(path.clone())),
+            None => None,
+        };
         let bases: Vec<String> = files
             .iter()
             .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
@@ -1973,10 +2246,27 @@ impl Features {
                 Wip::No
             };
             match entry_map.remove(base) {
-                Some(builder) => trials.extend(builder(path, wip)),
+                Some(builder) => trials.extend(builder(path, wip, recorder.clone())),
                 // No definer: run against an empty registry — every scenario is
                 // unbound (ignored) and the binding guard fails unless wip.
-                None => trials.extend(feature_trials::<()>(path, StepRegistry::new(), base, wip)),
+                None => trials.extend(feature_trials::<()>(
+                    path,
+                    StepRegistry::new(),
+                    base,
+                    wip,
+                    recorder.clone(),
+                )),
+            }
+        }
+        // Every row source is now known. If nothing is pending (every
+        // scenario was @skip/@todo/unbound — or the directory was empty),
+        // this is also the write; a write failure here becomes a failing
+        // trial, since there is no scenario trial left to carry it.
+        if let Some(r) = recorder {
+            if let Err(e) = r.done() {
+                trials.push(Trial::test("run manifest: written", move || {
+                    Err(Failed::from(e))
+                }));
             }
         }
         trials
@@ -1987,5 +2277,35 @@ impl Features {
     pub fn run(self) -> ! {
         let args = Arguments::from_args();
         libtest_mimic::run(&args, self.build_trials()).exit()
+    }
+}
+
+#[cfg(test)]
+mod manifest_unit {
+    use super::json_string;
+
+    // The two byte-level parity pins with the node sibling's manifest writer;
+    // everything behavioral lives in tests/manifest-proof.rs.
+
+    #[test]
+    fn json_string_matches_json_stringify() {
+        assert_eq!(json_string("plain"), "\"plain\"");
+        assert_eq!(json_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(json_string("\u{08}\t\n\u{0c}\r"), "\"\\b\\t\\n\\f\\r\"");
+        assert_eq!(json_string("\u{01}\u{1f}"), "\"\\u0001\\u001f\"");
+        // DEL, non-ASCII, and U+2028 stay raw — exactly as JSON.stringify
+        // leaves them.
+        assert_eq!(json_string("\u{7f}é😀\u{2028}"), "\"\u{7f}é😀\u{2028}\"");
+    }
+
+    #[test]
+    fn row_sort_is_code_point_order() {
+        // U+FF3A (Ｚ) < U+1F600 (😀) by code point; a UTF-16 code-unit sort
+        // (JS's native string order) would flip these. The node sibling
+        // implements code-point comparison explicitly to match this natural
+        // Rust order — see its compareCodePoints.
+        let mut rows = vec!["😀 emoji", "Ｚ fullwidth"];
+        rows.sort();
+        assert_eq!(rows, vec!["Ｚ fullwidth", "😀 emoji"]);
     }
 }

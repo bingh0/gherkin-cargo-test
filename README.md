@@ -67,7 +67,10 @@ types against the feature's `World` before anything runs.
 Because scenarios compile into `cargo test` trials, there is no second
 toolchain: one command runs unit tests and acceptance criteria together, with
 name filtering (`cargo test -- 'Counter'`) and CI integration inherited from
-Cargo itself. [cargo-nextest] works too.
+Cargo itself. [cargo-nextest] works too — with one scoped exception: the
+opt-in [run manifest](#the-run-manifest) needs a single-process run and is
+refused loudly under nextest (one red trial naming the fix; everything else
+runs normally).
 
 [cargo-nextest]: https://nexte.st
 
@@ -219,6 +222,67 @@ exclusion (cucumber's `excludeTags`): scenarios awaiting data or a pending
 experiment simply stay unbound under a `.wip()` feature — or, finer, under a
 `.wip_scenarios()` entry naming exactly them — visible as ignored, never
 silently green, and demanded by the guard the moment the marker comes off.
+
+## The run manifest
+
+Everything above makes a run that *happens* honest. It cannot make a run
+happen: a feature directory nobody points a runner at is green by absence —
+spec present, enforcement quietly missing, invisible in any diff of the
+feature files. The fix is one written sentence per run: **the runner writes
+down what ran, so a reader can notice what didn't.**
+
+```rust
+Features::new("features")
+    .feature("counter", counter_steps)
+    .manifest("features/run-manifest.ndjson")   // opt-in, one per feature dir
+    .run()
+```
+
+Every registered scenario becomes one NDJSON row — sorted, fixed key order,
+**byte-compatible with the node sibling's manifest** (same escaping, same
+code-point sort, same five statuses):
+
+```json
+{"file":"features/counter.feature","title":"increment once","status":"passed"}
+{"file":"features/counter.feature","title":"resumes after a gap","status":"unbound"}
+{"file":"features/counter.feature","title":"streams the tail live [1]","status":"skipped"}
+```
+
+Commit the manifest. A tool (or a reviewer) joining it against the
+`.feature` files in the tree sees the silent class structurally: a feature
+file with no rows in any manifest is coverage that isn't running.
+
+The contract, held deliberately small (`ManifestRecorder` in the source
+carries the full rules):
+
+- **Rows are `{file, title, status}` and nothing else.** No timestamps, no
+  durations — the bytes change only when results change; *when* comes from
+  the commit that touched it. Identity is path + title exactly as registered
+  (outline rows land individually, `title [n]`).
+- **Statuses are run-mode-independent.** `passed`/`failed` come from
+  execution; `skipped` (@skip), `todo` (@todo), and `unbound` come from
+  *registration* — a normal run and an `--include-ignored` run write
+  identical bytes, even though the latter executes parked bodies.
+- **A partial run never writes.** The file is written exactly once, when
+  every scenario's outcome has been observed. A name-filtered, `--list`, or
+  `--ignored` run leaves the previous manifest untouched. A directory that
+  registers zero scenarios writes a zero-byte file — visibly empty is an
+  account; an absent file would read as "never ran". A feature that fails to
+  read or parse disables the writer entirely: an account omitting its rows
+  would be absence-shaped.
+- **cargo-nextest is refused loudly.** The manifest needs one process to
+  observe the full run; nextest runs one test per process, so no process
+  ever can — silently never writing would be the exact class the manifest
+  exists to expose. Detected via nextest's env vars, the refusal is one
+  registered failing trial naming the fix (run the manifest lane under
+  `cargo test --test features`); every scenario still runs. Honest limit: an
+  unknown process-per-test runner without those env vars falls back to
+  never-writing — write-on-complete at least guarantees it never writes a
+  partial account.
+- **The runner stays stateless.** Nothing is read back, nothing gates on
+  the manifest, registration is unchanged. Failure history and change dating
+  are derivable by downstream tooling from the committed manifest's git
+  history.
 
 ## N-version verification
 
@@ -429,6 +493,8 @@ different, and each one is deliberate:
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
 | lint findings carry plain strings (`rule`, `severity`); `filename` defaults to `<feature>` | **`LintRule` / `LintSeverity` enums** with `as_str()`; `filename` is explicit | the compiler exhaustiveness-checks rule matches that JS can't; the *string forms and finding text* are identical both sides, held together by `tools/parity` |
 | `bindRunner(testFn)` + a `gherkin-node-test/vitest` adapter entry | **no analog** | node-only by nature: it rebinds registration onto a foreign JS runner's `test()`. The dialect and lint surface stay in lockstep; runner *hosting* is each sibling's own business |
+| manifest refuses a RE-INVOKED body (vitest retry/repeats re-run the same registered fn) | **no code** — libtest-mimic invokes each trial closure at most once, so the hazard is structurally unreachable | same doctrine, different fence: the cross-process cousin (nextest's one-test-per-process model) is what gets refused here, at build time via nextest's env vars |
+| manifest disabled by a parse error **at load** (validate-everything-first throws before registration) | manifest disabled by the parse failure **trial** (`base :: parses`; recorder disables itself, siblings still run) | same end — a run that failed validation never writes — reached through each sibling's own parse-failure channel |
 
 ## The linter role — under someone else's runner
 
@@ -488,7 +554,7 @@ loud by construction.
 
 | Export | Purpose |
 |---|---|
-| `Features::new(dir).feature(base, definer).wip(base).run()` | **high-level runner**: discover every `.feature`, scoped registries, typed worlds, guard trials |
+| `Features::new(dir).feature(base, definer).wip(base).run()` | **high-level runner**: discover every `.feature`, scoped registries, typed worlds, guard trials; `.manifest(path)` opts into the [run manifest](#the-run-manifest) |
 | `Features::build_trials()` | the same trials without running them (the guards are testable — see `tests/guards-proof.rs`) |
 | `parse_feature(text, filename)` | parse → `ParsedFeature` (incl. `outlines: Vec<OutlineMeta>`); `Err(GherkinSyntaxError)` on unsupported/malformed syntax |
 | `lint_feature(text, filename)` | **linter**: dialect gate + spec lints as `Vec<LintFinding>` — pure text-in/findings-out, for use under another runner |

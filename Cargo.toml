@@ -1,6 +1,6 @@
 [package]
 name = "gherkin-cargo-test"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 readme = "README.md"
@@ -27,4 +27,11 @@ harness = false
 # dirs, runs them through libtest-mimic in-process, asserts the Conclusion.
 [[test]]
 name = "guards-proof"
+harness = false
+
+# Executed proof of the run manifest: byte-exact accounts, the
+# write-on-complete rule, and the nextest refusal. The mixed fixture is a
+# verbatim copy of the node sibling's, so both suites prove the same rows.
+[[test]]
+name = "manifest-proof"
 harness = false
