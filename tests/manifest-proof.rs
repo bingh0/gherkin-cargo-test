@@ -52,14 +52,13 @@ fn out(name: &str) -> PathBuf {
 }
 
 /// Expected NDJSON for a fixture dir, mirroring the node test's row builder:
-/// fixed key order, `/`-normalized path, trailing newline.
+/// fixed key order, trailing newline. Expected rows are LITERAL relative
+/// paths — `file` is recorded relative to the manifest's own directory
+/// (target/manifest-proof here), and pinning the exact bytes is the point: an
+/// absolute path leaking into a row is the defect this format rule exists to
+/// prevent.
 fn rows(dir: &str, feature: &str, rows: &[(&str, &str)]) -> String {
-    let file = Path::new("tests/fixtures")
-        .join(dir)
-        .join(feature)
-        .display()
-        .to_string()
-        .replace(std::path::MAIN_SEPARATOR, "/");
+    let file = format!("../../tests/fixtures/{dir}/{feature}");
     let mut s = rows
         .iter()
         .map(|(title, status)| {
@@ -135,6 +134,59 @@ fn main() {
         got == mixed_expected && c.num_failed > 0,
         format!(
             "failed={} (unbound placeholder must fail when executed) got:\n{got}",
+            c.num_failed
+        ),
+    );
+
+    // The defect that drove 0.8.1: an ABSOLUTE feature-dir argument (the
+    // robust idiom in a real adopter's suite) must write the exact same
+    // bytes — machine paths must not leak into committed rows.
+    let m_abs = out("mixed-absdir.ndjson");
+    let abs_dir = std::env::current_dir()
+        .expect("cwd")
+        .join("tests/fixtures/manifest");
+    let c = run(Features::new(&abs_dir)
+        .feature("mixed", mixed_steps)
+        .wip_scenarios("mixed", ["pending thing"])
+        .manifest(&m_abs));
+    let got = fs::read_to_string(&m_abs).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    check(
+        &mut failures,
+        "absolute dir argument writes identical relative bytes",
+        c.num_failed == 0 && got == mixed_expected,
+        format!(
+            "failed={} got:\n{got}\nexpected:\n{mixed_expected}",
+            c.num_failed
+        ),
+    );
+
+    // A feature dir INSIDE the manifest's directory relativizes to a bare
+    // subpath — no ../ prefix (the node sibling pins the same shape in its
+    // code-point-sort test).
+    let inside_dir = Path::new("target")
+        .join("manifest-proof")
+        .join("features-inside");
+    fs::create_dir_all(&inside_dir).expect("create inside dir");
+    fs::write(
+        inside_dir.join("inside.feature"),
+        "Feature: inside\n  Scenario: sits beside the manifest\n    Given a bound step\n",
+    )
+    .expect("write inside.feature");
+    let m_in = out("inside.ndjson");
+    let c = run(Features::new(&inside_dir)
+        .feature("inside", mixed_steps)
+        .manifest(&m_in));
+    let inside_expected = concat!(
+        "{\"file\":\"features-inside/inside.feature\",",
+        "\"title\":\"sits beside the manifest\",\"status\":\"passed\"}\n"
+    );
+    let got = fs::read_to_string(&m_in).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    check(
+        &mut failures,
+        "feature dir inside the manifest dir yields a bare subpath",
+        c.num_failed == 0 && got == inside_expected,
+        format!(
+            "failed={} got:\n{got}\nexpected:\n{inside_expected}",
             c.num_failed
         ),
     );

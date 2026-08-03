@@ -1518,8 +1518,11 @@ struct ManifestState {
 ///  - No timestamps, no durations — the manifest's bytes change only when
 ///    results change; dating comes from the commit that touches it.
 ///  - Rows sort by (file, title, status) in code-point order and serialize
-///    with fixed key order; `\` in paths normalizes to `/` so the same run
-///    writes the same bytes on every platform.
+///    with fixed key order; `file` is recorded RELATIVE to the manifest
+///    file's own directory and `\` normalizes to `/`, so the same run writes
+///    the same bytes on every platform, at every checkout path, and however
+///    the caller spelled the feature dir — an absolute dir argument must not
+///    leak machine paths into committed bytes.
 ///  - `@skip` / `@todo` / unbound are recorded at REGISTRATION, never from
 ///    body execution: gct's ignored trials have live bodies that
 ///    `--include-ignored` executes, and `@todo` trials run on every
@@ -1542,13 +1545,65 @@ struct ManifestState {
 /// (see `Features::build_trials`).
 struct ManifestRecorder {
     path: PathBuf,
+    /// The manifest file's own directory, lexically resolved — every row's
+    /// `file` is recorded relative to here.
+    base: PathBuf,
     state: Mutex<ManifestState>,
+}
+
+/// The node sibling's `path.resolve`, lexically: absolute against the current
+/// directory, `.` dropped, `..` popped (clamped at the root) — WITHOUT
+/// touching the filesystem. Symlink resolution would make the manifest's
+/// bytes depend on the machine that wrote them.
+fn lexical_absolute(p: &Path) -> PathBuf {
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(p)
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The node sibling's `path.relative(base, target)` over already-resolved
+/// absolute paths: shared prefix dropped, one `..` per remaining base
+/// component. Roots that cannot reach each other (Windows drives) fall back
+/// to the target as resolved — exactly as node does.
+fn relative_to(base: &Path, target: &Path) -> PathBuf {
+    let b: Vec<_> = base.components().collect();
+    let t: Vec<_> = target.components().collect();
+    if b.first() != t.first() {
+        return target.to_path_buf();
+    }
+    let common = b.iter().zip(t.iter()).take_while(|(x, y)| x == y).count();
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &t[common..] {
+        out.push(c);
+    }
+    out
 }
 
 impl ManifestRecorder {
     fn new(path: PathBuf) -> Arc<Self> {
+        let base = lexical_absolute(&path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         Arc::new(Self {
             path,
+            base,
             state: Mutex::new(ManifestState {
                 rows: Vec::new(),
                 pending: 0,
@@ -1558,14 +1613,16 @@ impl ManifestRecorder {
         })
     }
 
-    fn norm(file: &str) -> String {
-        file.replace(std::path::MAIN_SEPARATOR, "/")
+    fn norm(&self, file: &str) -> String {
+        relative_to(&self.base, &lexical_absolute(Path::new(file)))
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
     }
 
     /// Record a status known at registration time (@skip / @todo / unbound).
     fn record_static(&self, file: &str, title: &str, status: &'static str) {
         let mut st = self.state.lock().unwrap();
-        st.rows.push((Self::norm(file), title.to_string(), status));
+        st.rows.push((self.norm(file), title.to_string(), status));
     }
 
     /// Reserve a slot for a plain bound scenario trial (called at build).
@@ -1578,7 +1635,7 @@ impl ManifestRecorder {
     /// the scenario's own result.
     fn finish_trial(&self, file: &str, title: &str, status: &'static str) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
-        st.rows.push((Self::norm(file), title.to_string(), status));
+        st.rows.push((self.norm(file), title.to_string(), status));
         st.pending -= 1;
         self.maybe_write(&mut st)
     }
@@ -2282,9 +2339,10 @@ impl Features {
 
 #[cfg(test)]
 mod manifest_unit {
-    use super::json_string;
+    use super::{json_string, relative_to};
+    use std::path::Path;
 
-    // The two byte-level parity pins with the node sibling's manifest writer;
+    // The byte-level parity pins with the node sibling's manifest writer;
     // everything behavioral lives in tests/manifest-proof.rs.
 
     #[test]
@@ -2307,5 +2365,27 @@ mod manifest_unit {
         let mut rows = vec!["😀 emoji", "Ｚ fullwidth"];
         rows.sort();
         assert_eq!(rows, vec!["Ｚ fullwidth", "😀 emoji"]);
+    }
+
+    #[test]
+    fn file_paths_relativize_against_the_manifest_dir() {
+        // The node sibling's path.relative over resolved paths: a feature
+        // inside the manifest's directory yields a bare subpath, one outside
+        // gets an honest `..` per remaining base component. (Path equality is
+        // component-wise, so these pins hold on every separator.)
+        assert_eq!(
+            relative_to(
+                Path::new("/repo/features"),
+                Path::new("/repo/features/counter.feature")
+            ),
+            Path::new("counter.feature")
+        );
+        assert_eq!(
+            relative_to(
+                Path::new("/repo/out/deep"),
+                Path::new("/repo/features/counter.feature")
+            ),
+            Path::new("../../features/counter.feature")
+        );
     }
 }

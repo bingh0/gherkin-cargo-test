@@ -243,9 +243,9 @@ Every registered scenario becomes one NDJSON row — sorted, fixed key order,
 code-point sort, same five statuses):
 
 ```json
-{"file":"features/counter.feature","title":"increment once","status":"passed"}
-{"file":"features/counter.feature","title":"resumes after a gap","status":"unbound"}
-{"file":"features/counter.feature","title":"streams the tail live [1]","status":"skipped"}
+{"file":"counter.feature","title":"increment once","status":"passed"}
+{"file":"counter.feature","title":"resumes after a gap","status":"unbound"}
+{"file":"counter.feature","title":"streams the tail live [1]","status":"skipped"}
 ```
 
 Commit the manifest. A tool (or a reviewer) joining it against the
@@ -257,8 +257,12 @@ carries the full rules):
 
 - **Rows are `{file, title, status}` and nothing else.** No timestamps, no
   durations — the bytes change only when results change; *when* comes from
-  the commit that touched it. Identity is path + title exactly as registered
-  (outline rows land individually, `title [n]`).
+  the commit that touched it. Identity is path + title (outline rows land
+  individually, `title [n]`); there is no invented ID scheme. `file` is
+  recorded **relative to the manifest file's own directory** — the account
+  must not change with the machine or checkout path that produced it, so an
+  absolute feature-dir argument never leaks machine paths into committed
+  bytes, and downstream joins stay portable.
 - **Statuses are run-mode-independent.** `passed`/`failed` come from
   execution; `skipped` (@skip), `todo` (@todo), and `unbound` come from
   *registration* — a normal run and an `--include-ignored` run write
