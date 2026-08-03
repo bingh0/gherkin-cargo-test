@@ -21,6 +21,11 @@ struct World;
 
 fn mixed_steps(reg: &mut StepRegistry<World>) {
     reg.define_exact("a bound step", |_, _, _| {});
+    // The @todo scenario's step: bound AND failing — declared debt that
+    // still fails is the tag's green state under the xfail inversion.
+    reg.define_exact("a bound step that still fails", |_, _, _| {
+        panic!("still fails, as declared")
+    });
 }
 
 fn red_steps(reg: &mut StepRegistry<World>) {
@@ -59,7 +64,8 @@ fn out(name: &str) -> PathBuf {
 /// prevent.
 fn rows(dir: &str, feature: &str, rows: &[(&str, &str)]) -> String {
     let file = format!("../../tests/fixtures/{dir}/{feature}");
-    let mut s = rows
+    let mut s = String::from("{\"run-manifest\":1}\n");
+    s += &rows
         .iter()
         .map(|(title, status)| {
             format!("{{\"file\":\"{file}\",\"title\":\"{title}\",\"status\":\"{status}\"}}")
@@ -177,6 +183,7 @@ fn main() {
         .feature("inside", mixed_steps)
         .manifest(&m_in));
     let inside_expected = concat!(
+        "{\"run-manifest\":1}\n",
         "{\"file\":\"features-inside/inside.feature\",",
         "\"title\":\"sits beside the manifest\",\"status\":\"passed\"}\n"
     );
@@ -230,17 +237,19 @@ fn main() {
         format!("failed={} got:\n{got}\nexpected:\n{expected}", c.num_failed),
     );
 
-    // A directory that registers zero scenarios writes a ZERO-BYTE account —
-    // visibly empty, never a lone newline, never absent.
+    // 0.9.0: an empty feature directory is REFUSED — one failing trial, no
+    // account written or claimed. The zero-byte-account rationale lost to
+    // the honest-run contract's refusal: nothing-was-enforced must be loud,
+    // not a green file.
     let empty_dir = Path::new("target").join("manifest-proof").join("empty");
     fs::create_dir_all(&empty_dir).expect("create empty dir");
     let m5 = out("empty.ndjson");
-    let _ = run(Features::new(&empty_dir).manifest(&m5));
+    let c = run(Features::new(&empty_dir).manifest(&m5));
     check(
         &mut failures,
-        "empty dir writes zero bytes",
-        fs::read(&m5).map(|b| b.is_empty()).unwrap_or(false),
-        format!("expected empty file at {}", m5.display()),
+        "empty dir is refused, no account",
+        c.num_failed == 1 && !m5.exists(),
+        format!("failed={}, manifest exists={}", c.num_failed, m5.exists()),
     );
 
     // A feature that fails to parse disables the writer: the account cannot

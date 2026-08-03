@@ -31,8 +31,10 @@
 //!                       argument (raw/rows/hashes/rows_hash/transpose). Cells
 //!                       honor \| \\ \n escapes; other backslashes are literal.
 //!   Tags:               @skip marks the trial ignored (steps must still BIND —
-//!                       skip means "don't run", never "don't bind"); @todo runs
-//!                       the scenario but a failure doesn't gate the suite; tags
+//!                       skip means "don't run", never "don't bind"); @todo is
+//!                       inverted (xfail): the scenario runs, an expected
+//!                       failure is printed and gates nothing, and a @todo
+//!                       that PASSES fails the run naming the stale tag; tags
 //!                       on Feature: apply to all its scenarios; all other tags
 //!                       (e.g. @AC3) are carried but have no effect. @only is
 //!                       REJECTED loudly — use `cargo test <name filter>`.
@@ -84,6 +86,11 @@ use regex::Regex;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GherkinSyntaxError {
     pub line: usize,
+    /// Which lint rule this refusal surfaces as — the parser's refusals are
+    /// the error tier of the lint, and lint_feature must not re-derive the
+    /// rule from message text. "dialect" unless the refusal has its own
+    /// ratified rule name (today: "no-scenarios").
+    pub rule: &'static str,
     message: String,
 }
 
@@ -91,6 +98,7 @@ impl GherkinSyntaxError {
     fn new(filename: &str, line: usize, msg: &str) -> Self {
         Self {
             line,
+            rule: "dialect",
             message: format!("{filename}:{line}: {msg}"),
         }
     }
@@ -758,12 +766,14 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
                 }
             }
         }
-        return Err(fail(
+        let mut e = fail(
             feature_line,
             &format!(
-                "Feature \"{feature}\" has no scenarios — the file registers nothing and would read as passing{hint}"
+                "Feature \"{feature}\" has no scenarios — the file enforces nothing and would read as passing{hint}"
             ),
-        ));
+        );
+        e.rule = "no-scenarios";
+        return Err(e);
     }
     Ok(ParsedFeature {
         feature,
@@ -781,24 +791,30 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LintRule {
     Dialect,
+    NoScenarios,
     NoThen,
     VagueThen,
     SingleRowOutline,
     NearMissKeyword,
+    DroppedProse,
     DuplicateTitle,
     UnusedColumn,
+    StrictTag,
 }
 
 impl LintRule {
     pub fn as_str(self) -> &'static str {
         match self {
             LintRule::Dialect => "dialect",
+            LintRule::NoScenarios => "no-scenarios",
             LintRule::NoThen => "no-then",
             LintRule::VagueThen => "vague-then",
             LintRule::SingleRowOutline => "single-row-outline",
             LintRule::NearMissKeyword => "near-miss-keyword",
+            LintRule::DroppedProse => "dropped-prose",
             LintRule::DuplicateTitle => "duplicate-title",
             LintRule::UnusedColumn => "unused-column",
+            LintRule::StrictTag => "strict-tag",
         }
     }
 }
@@ -1068,6 +1084,37 @@ fn step_keyword_exact(lower: &str) -> Option<&'static str> {
 /// the rows that produce it. Severity is descriptive, not policy: the
 /// wip-style debt register (filtering by rule) belongs to the consumer.
 pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
+    lint_feature_impl(text, filename, false)
+}
+
+/// Strict mode is one bit: every warning from `lint_feature` is promoted to
+/// an error — same rule, same line, same message — and the strict-only rule
+/// `strict-tag` joins in (a `@skip` or `@only` tag is an error: reviewed
+/// output carries no silent debt or focus; reported at the header line of
+/// each construct the tag reaches). `@todo` is deliberately exempt
+/// (visionary ruling, 2026-08-03): the stale-@todo inversion polices it at
+/// run time, so a committed @todo is honest, visible, self-retiring debt.
+/// Nothing is ever removed or reworded by promotion, so a strict-clean file
+/// is clean in default mode by construction. There is no relaxed mode:
+/// strict promotes, nothing demotes. New rules pass the four admission tests
+/// of the node sibling's docs/lint-admission.md, which binds this crate in
+/// lockstep.
+pub fn lint_feature_strict(text: &str, filename: &str) -> Vec<LintFinding> {
+    lint_feature_impl(text, filename, true)
+}
+
+// What strict mode says about each semantic tag — byte-identical to the node
+// sibling. Every message derives its fix from the finding alone (admission
+// test 1), and every fix is a diff in the reviewed file (admission test 2).
+fn strict_tag_message(tag: &str) -> &'static str {
+    match tag {
+        "@skip" => "tag \"@skip\" has no place in reviewed output — a committed skip hides this scenario from every run, debt with no ledger entry; make the scenario pass or delete it",
+        "@only" => "tag \"@only\" has no place in reviewed output — focus is a per-run flag (--test-name-pattern / -t / --filter), never a committed edit; remove the tag",
+        _ => unreachable!("strict_tag_message covers exactly the strict-flagged tags"),
+    }
+}
+
+fn lint_feature_impl(text: &str, filename: &str, strict: bool) -> Vec<LintFinding> {
     type Seen = HashSet<(LintRule, usize, String)>;
     // Identical (rule, line, message) triples collapse: expanded outline rows
     // share their source lines, so a row-independent finding lands once while
@@ -1124,7 +1171,10 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
             let prefix = format!("{filename}:{}: ", e.line);
             let message = msg.strip_prefix(&prefix).unwrap_or(&msg).to_string();
             return vec![LintFinding {
-                rule: LintRule::Dialect,
+                rule: match e.rule {
+                    "no-scenarios" => LintRule::NoScenarios,
+                    _ => LintRule::Dialect,
+                },
                 severity: LintSeverity::Error,
                 line: e.line,
                 message,
@@ -1231,9 +1281,11 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
     // dropped", so the rule cannot drift from the parse. A correctly cased
     // step or an exact construct header never appears here: the parser
     // consumed it. Message text is byte-identical to the node sibling.
+    let mut near_missed: HashSet<usize> = HashSet::new();
     for n in &parsed.narrative {
         if let Some((shown, exact)) = near_miss_construct(&n.text) {
             if shown != exact {
+                near_missed.insert(n.line);
                 warn(
                     &mut findings,
                     &mut seen,
@@ -1256,6 +1308,7 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
         };
         if let Some(exact) = step_keyword_exact(&word.to_lowercase()) {
             if word != exact {
+                near_missed.insert(n.line);
                 warn(
                     &mut findings,
                     &mut seen,
@@ -1265,6 +1318,63 @@ pub fn lint_feature(text: &str, filename: &str) -> Vec<LintFinding> {
                         "\"{word}\" is not the step keyword \"{exact}\" — keywords are exact-case, so this line is parsed as narrative and its requirement is silently dropped"
                     ),
                 );
+            }
+        }
+    }
+
+    // dropped-prose: the floor under near-miss-keyword — every in-body
+    // narrative line the walk above did not claim gets a finding, so no line
+    // inside a body vanishes in silence. Near miss keeps its lines: it is
+    // the sharper diagnosis, and one finding per dropped line is the
+    // accounting contract. Message text is byte-identical to the node
+    // sibling.
+    for n in &parsed.narrative {
+        if !n.in_body || near_missed.contains(&n.line) {
+            continue;
+        }
+        warn(
+            &mut findings,
+            &mut seen,
+            LintRule::DroppedProse,
+            n.line,
+            format!(
+                "\"{}\" is not a step — the parser drops this line silently and it enforces nothing; make it a Given/When/Then step, or a # comment if it is commentary",
+                n.text
+            ),
+        );
+    }
+
+    if strict {
+        // strict-tag: reviewed output carries no committed debt or focus —
+        // see lint_feature_strict. Reported at the header line of each
+        // construct the tag reaches; expanded outline rows share their
+        // source line and tags, so the dedup collapses them to one finding
+        // per construct.
+        // @todo is deliberately NOT here (visionary ruling, 2026-08-03
+        // review, position 17): the stale-@todo inversion polices the tag at
+        // run time — a @todo that still fails is honest declared debt
+        // reviewed output may carry, and one that passes is already red.
+        for sc in &parsed.scenarios {
+            for tag in ["@skip", "@only"] {
+                if sc.tags.iter().any(|t| t == tag) {
+                    add(
+                        &mut findings,
+                        &mut seen,
+                        LintRule::StrictTag,
+                        LintSeverity::Error,
+                        sc.line,
+                        strict_tag_message(tag).to_string(),
+                    );
+                }
+            }
+        }
+        // Promotion is one bit, applied last: same rule, same line, same
+        // message. Strict may add findings and raise severity — never remove
+        // or reword — so a strict-clean file is clean in default mode by
+        // construction.
+        for f in &mut findings {
+            if f.severity == LintSeverity::Warn {
+                f.severity = LintSeverity::Error;
             }
         }
     }
@@ -1419,7 +1529,39 @@ fn panic_msg(e: Box<dyn Any + Send>) -> String {
 /// and its .feature line). Deferred cleanup (`ctx.defer`) runs LIFO even when
 /// a step failed; the step failure outranks cleanup errors. Exposed so tests
 /// and other harnesses can drive it without going through `cargo test`.
+/// The ambiguity refusal for a list of steps, or None: the first step
+/// matching more than one binding, named together with every matching
+/// pattern, so the fix (tighten one pattern until exactly one matches) is
+/// derivable from the failure alone. One definition shared by the
+/// execute_steps preflight and the registration-time check in the trial
+/// builder, so the two can never drift.
+fn ambiguity_error<W>(steps: &[Step], reg: &StepRegistry<W>) -> Option<String> {
+    for step in steps {
+        let matching = reg.matching(&step.text);
+        if matching.len() > 1 {
+            return Some(format!(
+                "Ambiguous step: {}\nmatches {} definitions:\n{}\ntighten the patterns until exactly one matches — the scenario did not execute",
+                step.text,
+                matching.len(),
+                matching
+                    .iter()
+                    .map(|&i| format!("  {}", reg.defs[i].0.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+    }
+    None
+}
+
 pub fn execute_steps<W>(steps: &[Step], reg: &StepRegistry<W>, world: W) -> Result<W, String> {
+    // Ambiguity preflight, before ANY step runs: a step matching two
+    // bindings must fail the scenario without executing it — which binding
+    // would have run is silent information, and running "up to the ambiguous
+    // step" would leak a partial execution into the world.
+    if let Some(e) = ambiguity_error(steps, reg) {
+        return Err(e);
+    }
     let mut ctx = Ctx::new(world);
     let mut failure: Option<String> = None;
     for step in steps {
@@ -1659,24 +1801,22 @@ impl ManifestRecorder {
         }
         let mut rows = st.rows.clone();
         rows.sort();
-        let text = if rows.is_empty() {
-            String::new()
-        } else {
-            let mut t = rows
-                .iter()
-                .map(|(file, title, status)| {
-                    format!(
-                        "{{\"file\":{},\"title\":{},\"status\":{}}}",
-                        json_string(file),
-                        json_string(title),
-                        json_string(status)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            t.push('\n');
-            t
-        };
+        // Every account begins with the in-band schema declaration — the
+        // file must explain itself to whoever holds it, with no other
+        // context. The key names the FORMAT, not the tool: the node sibling
+        // writes these exact bytes too. Version bumps ONLY on a change that
+        // would mislead a version-1 reader (a new status value is not one; a
+        // changed row shape or sort order is). Zero rows still write the
+        // declaration line: whatever this writer writes is an account.
+        let mut text = String::from("{\"run-manifest\":1}\n");
+        for (file, title, status) in &rows {
+            text.push_str(&format!(
+                "{{\"file\":{},\"title\":{},\"status\":{}}}\n",
+                json_string(file),
+                json_string(title),
+                json_string(status)
+            ));
+        }
         fs::write(&self.path, text)
             .map_err(|e| format!("run manifest: cannot write {}: {e}", self.path.display()))
     }
@@ -1976,6 +2116,27 @@ fn feature_trials<W: Default + 'static>(
             );
             continue;
         }
+        // Ambiguity is a BINDING defect, so it is detected at registration
+        // and outranks the tags below: @skip must not park it (skip means
+        // "don't run", never "don't bind" — the same precedence the unbound
+        // check above applies), and @todo must not wear it as declared debt
+        // (the inversion would print a binding defect as an expected
+        // failure). The refusal is a plain failing trial either way.
+        if let Some(amb) = ambiguity_error(&steps, &reg) {
+            if let Some(r) = &recorder {
+                r.begin_trial();
+            }
+            let r = recorder.clone();
+            let file2 = file.clone();
+            let scenario_name = sc.name.clone();
+            trials.push(Trial::test(title, move || {
+                if let Some(r) = &r {
+                    let _ = r.finish_trial(&file2, &scenario_name, "failed");
+                }
+                Err(Failed::from(amb))
+            }));
+            continue;
+        }
         // Manifest statuses for @skip and @todo come from the TAG, never the
         // body — these trials' bodies run in some modes and not others
         // (`--include-ignored` executes a parked @skip body; @todo runs every
@@ -2017,6 +2178,12 @@ fn feature_trials<W: Default + 'static>(
         let scenario_name = sc.name.clone();
         let mut trial = Trial::test(title, move || {
             match execute_steps(&steps, &reg, W::default()) {
+                // The stale half of the @todo inversion, checked FIRST: the
+                // run that would silently turn a declared expected-fail
+                // green goes red instead, naming the tag.
+                Ok(_) if todo => Err(Failed::from(format!(
+                    "{file}: @todo scenario \"{scenario_name}\" now passes — the tag is stale; remove @todo so the scenario gates the run"
+                ))),
                 Ok(_) => {
                     if let Some(r) = &trial_recorder {
                         r.finish_trial(&file, &scenario_name, "passed")
@@ -2025,7 +2192,8 @@ fn feature_trials<W: Default + 'static>(
                     Ok(())
                 }
                 Err(e) if todo => {
-                    eprintln!("(@todo, failure tolerated) {trial_title}: {e}");
+                    let first = e.lines().next().unwrap_or("");
+                    eprintln!("@todo \"{trial_title}\" fails as declared — gating nothing until it passes: {first}");
                     Ok(())
                 }
                 Err(e) => {
@@ -2209,13 +2377,47 @@ impl Features {
                 .filter(|p| p.extension().is_some_and(|x| x == "feature"))
                 .collect(),
             Err(e) => {
-                let msg = format!("cannot read feature dir {}: {e}", self.dir.display());
-                return vec![Trial::test("feature directory is readable", move || {
-                    Err(Failed::from(msg))
-                })];
+                // A missing directory is refused BY NAME — a raw io error
+                // names the OS's complaint, not the fix. Other read errors
+                // (permissions, a file where a directory should be) keep the
+                // OS detail. Registered refusals, not panics, so the rest of
+                // a multi-directory suite still reports.
+                let (title, msg) = match e.kind() {
+                    std::io::ErrorKind::NotFound => (
+                        "the feature directory is missing",
+                        format!(
+                            "feature directory {:?} does not exist — nothing was enforced; point the runner at the directory holding the .feature files",
+                            self.dir.display().to_string()
+                        ),
+                    ),
+                    std::io::ErrorKind::NotADirectory => (
+                        "the feature path is not a directory",
+                        format!(
+                            "{:?} is not a directory — nothing was enforced; point the runner at the directory holding the .feature files, not at a file",
+                            self.dir.display().to_string()
+                        ),
+                    ),
+                    _ => (
+                        "the feature directory is unreadable",
+                        format!("cannot read feature dir {}: {e}", self.dir.display()),
+                    ),
+                };
+                return vec![Trial::test(title, move || Err(Failed::from(msg)))];
             }
         };
         files.sort();
+        if files.is_empty() {
+            // An empty directory would be a silently green zero-scenario run:
+            // coverage accounting that quietly enforces nothing, the exact
+            // class this runner exists to refuse.
+            let msg = format!(
+                "no .feature files were found in {:?} — nothing was enforced; add the feature files there, or point the runner at the directory holding them",
+                self.dir.display().to_string()
+            );
+            return vec![Trial::test("the feature directory is empty", move || {
+                Err(Failed::from(msg))
+            })];
+        }
 
         // The run manifest requires one process to observe every scenario's
         // outcome; cargo-nextest runs one test per process, so no process

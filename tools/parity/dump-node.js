@@ -14,12 +14,13 @@ const dumpStep = (prefix, st) => {
 };
 
 const args = process.argv.slice(2);
-const lintMode = args[0] === '--lint';
+const lintMode = args[0] === '--lint' || args[0] === '--lint-strict';
+const strict = args[0] === '--lint-strict';
 const path = lintMode ? args[1] : args[0];
-if (!path) { console.error('usage: dump-node.js [--lint] <file.feature>'); process.exit(2); }
+if (!path) { console.error('usage: dump-node.js [--lint | --lint-strict] <file.feature>'); process.exit(2); }
 const text = readFileSync(path, 'utf8');
 if (lintMode) {
-  for (const f of lintFeature(text, path)) {
+  for (const f of lintFeature(text, path, { strict })) {
     out.push(`FINDING\t${f.rule}\t${f.severity}\t${f.line}\t${esc(f.message)}`);
   }
   console.log(out.join('\n'));

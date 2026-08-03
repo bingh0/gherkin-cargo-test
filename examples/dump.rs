@@ -22,10 +22,12 @@
 //   NARRATIVE <line> <in_body> <text> a line the parser dropped as narrative
 //
 // With --lint, dumps lint_feature's findings instead (nothing for a clean
-// file) — finding TEXT is part of the parity contract with the node sibling:
+// file) — finding TEXT is part of the parity contract with the node sibling;
+// --lint-strict does the same through lint_feature_strict, so strict-mode
+// promotion and the strict-only rules stay under differential coverage too:
 //   FINDING <rule> <severity> <line> <message>
 
-use gherkin_cargo_test::{lint_feature, parse_feature, Step};
+use gherkin_cargo_test::{lint_feature, lint_feature_strict, parse_feature, Step};
 
 fn esc(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -51,19 +53,25 @@ fn dump_step(prefix: &str, st: &Step) {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let lint = args.first().map(|a| a == "--lint").unwrap_or(false);
-    if lint {
+    let lint_strict = args.first().map(|a| a == "--lint-strict").unwrap_or(false);
+    if lint || lint_strict {
         args.remove(0);
     }
     let path = args.into_iter().next().unwrap_or_else(|| {
-        eprintln!("usage: dump [--lint] <file.feature>");
+        eprintln!("usage: dump [--lint | --lint-strict] <file.feature>");
         std::process::exit(2);
     });
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("READ ERROR {path}: {e}");
         std::process::exit(2);
     });
-    if lint {
-        for f in lint_feature(&text, &path) {
+    if lint || lint_strict {
+        let findings = if lint_strict {
+            lint_feature_strict(&text, &path)
+        } else {
+            lint_feature(&text, &path)
+        };
+        for f in findings {
             println!(
                 "FINDING\t{}\t{}\t{}\t{}",
                 f.rule.as_str(),

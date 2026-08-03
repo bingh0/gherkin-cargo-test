@@ -4,7 +4,7 @@
 // noise, and noise gets allowlisted into silence. Finding TEXT parity with
 // the node sibling is verified separately (differentially) by tools/parity.
 
-use gherkin_cargo_test::{lint_feature, LintFinding, LintRule, LintSeverity};
+use gherkin_cargo_test::{lint_feature, lint_feature_strict, LintFinding, LintRule, LintSeverity};
 
 fn feat(body: &str) -> String {
     format!("Feature: Lint demo\n{body}")
@@ -336,22 +336,26 @@ fn background_bodies_are_checked_too() {
 
 #[test]
 fn stays_quiet_on_words_that_merely_begin_with_a_keyword() {
+    // dropped-prose accounts for the line instead (0.9.0): near-miss must
+    // not claim it, because "Givens…" was never a step at any casing.
     let findings = lint_feature(
         &feat("Scenario: S\n  Given a counter at 0\n  Givens are not keywords\n  Then the counter is 0\n"),
         "<feature>",
     );
-    assert!(findings.is_empty(), "expected none, got {findings:?}");
+    assert_eq!(rules(&findings), ["dropped-prose"]);
 }
 
 #[test]
 fn a_bare_keyword_with_no_step_text_is_ordinary_narrative() {
     // "given" alone could not have been a step at any casing, so flagging it
     // would be a false positive rather than a rescued requirement.
+    // …but it is still a dropped in-body line, so dropped-prose accounts
+    // for it.
     let findings = lint_feature(
         &feat("Scenario: S\n  Given a counter at 0\n  given\n  Then the counter is 0\n"),
         "<feature>",
     );
-    assert!(findings.is_empty(), "expected none, got {findings:?}");
+    assert_eq!(rules(&findings), ["dropped-prose"]);
 }
 
 #[test]
@@ -480,7 +484,11 @@ fn construct_like_prose_without_the_colon_shape_stays_quiet() {
         ),
         "<feature>",
     );
-    assert!(findings.is_empty(), "expected none, got {findings:?}");
+    // The Feature-narrative lines stay finding-free; the one IN-BODY prose
+    // line falls to dropped-prose — the accounting rule, not a keyword
+    // diagnosis.
+    assert_eq!(rules(&findings), ["dropped-prose"]);
+    assert_eq!(findings[0].line, 8);
 }
 
 // --- duplicate-title ---------------------------------------------------------------
@@ -626,28 +634,144 @@ fn unused_column_fires_once_per_column_not_once_per_row() {
     assert_eq!(findings.iter().map(|f| f.line).collect::<Vec<_>>(), [6, 6]);
 }
 
-// --- no-scenarios (a dialect error, not a separate rule) ---------------------------
+// --- no-scenarios ------------------------------------------------------------------
+// Its own rule name since 0.9.0 (the node sibling's intent tier ratified it
+// as one): the refusal still comes from the parser, but "add a scenario or
+// delete the file" is a different remedy than "fix this line".
 
 #[test]
-fn a_feature_with_no_scenarios_is_a_dialect_error_at_the_feature_line() {
+fn a_feature_with_no_scenarios_is_an_error_finding_at_the_feature_line() {
     let findings = lint_feature(
         "Feature: Overdraft alerts\n  Alerts go out before the close of day.\n",
         "v.feature",
     );
-    assert_eq!(rules(&findings), ["dialect"]);
+    assert_eq!(rules(&findings), ["no-scenarios"]);
     assert_eq!(findings[0].severity, LintSeverity::Error);
     assert_eq!(findings[0].line, 1);
     assert!(findings[0].message.contains("has no scenarios"));
+    assert!(findings[0].message.contains("enforces nothing"));
 }
 
 #[test]
-fn the_no_scenarios_dialect_finding_names_a_construct_near_miss() {
+fn the_no_scenarios_finding_names_a_construct_near_miss() {
     let findings = lint_feature(
         "Feature: F\nscenario: s\n  given a\n  then ok\n",
         "x.feature",
     );
-    assert_eq!(rules(&findings), ["dialect"]);
+    assert_eq!(rules(&findings), ["no-scenarios"]);
     assert!(findings[0]
         .message
         .contains("line 2 \"scenario:\" is not the exact construct keyword \"Scenario:\""));
+}
+
+// --- dropped-prose -----------------------------------------------------------------
+
+#[test]
+fn dropped_prose_warns_with_the_line_text_in_the_message() {
+    let findings = lint_feature(
+        &feat("Scenario: stays positive\n  Given a balance of 10\n  the balance must never go negative\n  Then the balance is 10\n"),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["dropped-prose"]);
+    assert_eq!(findings[0].severity, LintSeverity::Warn);
+    assert_eq!(findings[0].line, 4);
+    assert!(findings[0].message.contains("\"the balance must never go negative\" is not a step"));
+    assert!(findings[0].message.contains("# comment"));
+}
+
+#[test]
+fn dropped_prose_never_doubles_up_on_a_near_miss_line() {
+    let findings = lint_feature(
+        &feat("Scenario: S\n  Given a counter at 0\n  when I add 5\n  Then the counter is 5\n"),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["near-miss-keyword"]);
+}
+
+#[test]
+fn dropped_prose_exempts_feature_narrative_and_comments() {
+    let findings = lint_feature(
+        concat!(
+            "Feature: F\n  As a user\n  I want prose up here\n\n",
+            "Scenario: S\n  # commentary is visibly non-enforcing\n",
+            "  Given a counter at 0\n  Then the counter is 0\n",
+        ),
+        "<feature>",
+    );
+    assert!(findings.is_empty(), "expected none, got {findings:?}");
+}
+
+#[test]
+fn dropped_prose_covers_background_bodies() {
+    let findings = lint_feature(
+        &feat("Background:\n  the store is seeded overnight\n  Given a counter at 0\nScenario: S\n  Then the counter is 0\n"),
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["dropped-prose"]);
+    assert_eq!(findings[0].line, 3);
+}
+
+// --- strict mode -------------------------------------------------------------------
+
+#[test]
+fn strict_promotes_every_warning_nothing_reworded_or_dropped() {
+    let text = feat("Scenario: poke\n  Given a thing\n  When I poke it\nScenario: waves\n  When I wave\n  Then it works\n");
+    let dflt = lint_feature(&text, "x.feature");
+    assert_eq!(rules(&dflt), ["no-then", "vague-then"]);
+    assert!(dflt.iter().all(|f| f.severity == LintSeverity::Warn));
+    let strict = lint_feature_strict(&text, "x.feature");
+    let promoted: Vec<LintFinding> = dflt
+        .iter()
+        .map(|f| LintFinding { severity: LintSeverity::Error, ..f.clone() })
+        .collect();
+    assert_eq!(strict, promoted);
+}
+
+#[test]
+fn strict_tag_flags_skip_and_only_only_in_strict_mode() {
+    for tag in ["@skip", "@only"] {
+        let text = feat(&format!("{tag}\nScenario: S\n  Given a counter at 0\n  Then the counter is 0\n"));
+        assert!(lint_feature(&text, "x.feature").is_empty(), "{tag} lints clean in default mode");
+        let strict = lint_feature_strict(&text, "x.feature");
+        assert_eq!(rules(&strict), ["strict-tag"], "{tag} is flagged in strict mode");
+        assert_eq!(strict[0].severity, LintSeverity::Error);
+        assert_eq!(strict[0].line, 3, "reported at the tagged construct header");
+        assert!(strict[0].message.contains(&format!("tag \"{tag}\" has no place in reviewed output")));
+    }
+}
+
+#[test]
+fn strict_tag_exempts_todo_the_inversion_polices_it_at_run_time() {
+    // Visionary ruling (2026-08-03 review, position 17): a committed @todo
+    // that still fails is honest, self-retiring debt; one that passes is
+    // already red. Strict lint has nothing to add.
+    let text = feat("@todo\nScenario: S\n  Given a counter at 0\n  Then the counter is 0\n");
+    assert!(lint_feature_strict(&text, "x.feature").is_empty());
+}
+
+#[test]
+fn strict_tag_ignores_ordinary_annotation_tags() {
+    let text = feat("@AC7\nScenario: S\n  Given a counter at 0\n  Then the counter is 0\n");
+    assert!(lint_feature_strict(&text, "x.feature").is_empty());
+}
+
+#[test]
+fn strict_tag_fires_once_per_construct_not_per_expanded_row() {
+    let text = feat(concat!(
+        "@skip\nScenario Outline: add <n>\n  When I add <n>\n  Then the counter is <n>\n",
+        "  Examples:\n    | n |\n    | 1 |\n    | 2 |\n    | 3 |\n",
+    ));
+    assert_eq!(rules(&lint_feature_strict(&text, "x.feature")), ["strict-tag"]);
+}
+
+#[test]
+fn strict_tag_lands_on_every_scenario_a_feature_level_tag_hides() {
+    let text = concat!(
+        "@skip\nFeature: F\n",
+        "Scenario: one\n  Given a\n  Then b\n",
+        "Scenario: two\n  Given a\n  Then b\n",
+    );
+    let strict = lint_feature_strict(text, "x.feature");
+    assert_eq!(rules(&strict), ["strict-tag", "strict-tag"]);
+    assert_eq!(strict.iter().map(|f| f.line).collect::<Vec<_>>(), [3, 6]);
 }

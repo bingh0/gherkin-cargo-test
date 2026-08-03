@@ -12,7 +12,7 @@ Feature: Mixed
 
   @todo
   Scenario: todo one
-    Given a bound step
+    Given a bound step that still fails
 
   Scenario: pending thing
     Given an unbound step

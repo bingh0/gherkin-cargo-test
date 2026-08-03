@@ -234,8 +234,9 @@ fn main() {
     );
 
     // A step matching two definitions: the ambiguity guard fails. The scenario
-    // itself still runs (first match wins), so it passes — the guard is what
-    // makes the suite red. Ambiguity is checked even for .wip() features.
+    // itself refuses too (0.9.0): the execute_steps preflight fails the
+    // scenario naming both bindings, before any step runs — so the guard AND
+    // the scenario are red. Ambiguity is checked even for .wip() features.
     let ambiguous_defs = |reg: &mut StepRegistry<World>| {
         reg.define(r"^a doubly matched step$", |_, _, _| {});
         reg.define(r"doubly matched", |_, _, _| {});
@@ -244,8 +245,8 @@ fn main() {
         &mut failures,
         "ambiguous",
         run(Features::new("tests/fixtures/ambiguous").feature("amb", ambiguous_defs)),
-        2, // orphan guard + scenario
-        1, // binding guard fails
+        1, // orphan guard
+        2, // binding guard + the refusing scenario
         0,
     );
     check(
@@ -254,8 +255,8 @@ fn main() {
         run(Features::new("tests/fixtures/ambiguous")
             .feature("amb", ambiguous_defs)
             .wip("amb")),
-        2,
         1,
+        2,
         0,
     );
 
@@ -315,6 +316,43 @@ fn main() {
         )),
         4, // orphan + binding + tolerated @todo scenario + passing scenario
         0,
+        0,
+    );
+
+    // @todo + ambiguity (0.9.0): a binding defect outranks the tag — the
+    // ambiguous scenario is a plain failing trial, never printed-and-
+    // tolerated as declared debt. The non-@todo passing sibling still runs.
+    check(
+        &mut failures,
+        "todo-ambiguous",
+        run(Features::new("tests/fixtures/todo").feature(
+            "todo",
+            |reg: &mut StepRegistry<World>| {
+                value_steps(reg);
+                reg.define_exact("a step that panics", |_, _, _| {});
+                reg.define("panics", |_, _, _| {});
+            },
+        )),
+        2, // orphan + passing scenario
+        2, // binding guard (ambiguity) + the refused @todo scenario
+        0,
+    );
+
+    // The stale half of the @todo inversion (0.9.0): the same corpus with a
+    // definer that no longer panics — the run that would first turn the
+    // declared debt green goes red instead, naming the stale tag.
+    check(
+        &mut failures,
+        "todo-stale",
+        run(Features::new("tests/fixtures/todo").feature(
+            "todo",
+            |reg: &mut StepRegistry<World>| {
+                value_steps(reg);
+                reg.define_exact("a step that panics", |_, _, _| {});
+            },
+        )),
+        3, // orphan + binding + passing scenario
+        1, // the stale @todo
         0,
     );
 
