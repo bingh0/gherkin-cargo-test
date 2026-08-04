@@ -237,6 +237,40 @@ fn main() {
         format!("failed={} got:\n{got}\nexpected:\n{expected}", c.num_failed),
     );
 
+    // A stale @todo (its step now passes) is recorded as the failure it is:
+    // the run is red and the account explains the red — 'failed', never a
+    // green-looking 'todo' declaration (ratified 2026-08-03, owner queue).
+    let m_stale = out("mixed-stale-todo.ndjson");
+    let c = run(Features::new("tests/fixtures/manifest")
+        .feature("mixed", |reg: &mut StepRegistry<World>| {
+            reg.define_exact("a bound step", |_, _, _| {});
+            reg.define_exact("a bound step that still fails", |_, _, _| {});
+        })
+        .wip_scenarios("mixed", ["pending thing"])
+        .manifest(&m_stale));
+    let got = fs::read_to_string(&m_stale).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    let stale_expected = rows(
+        "manifest",
+        "mixed.feature",
+        &[
+            ("passes", "passed"),
+            ("pending thing", "unbound"),
+            ("skipped one", "skipped"),
+            ("sweep 1 [1]", "passed"),
+            ("sweep 2 [2]", "passed"),
+            ("todo one", "failed"),
+        ],
+    );
+    check(
+        &mut failures,
+        "stale @todo records failed, run red",
+        c.num_failed == 1 && got == stale_expected,
+        format!("failed={} got:
+{got}
+expected:
+{stale_expected}", c.num_failed),
+    );
+
     // 0.9.0: an empty feature directory is REFUSED — one failing trial, no
     // account written or claimed. The zero-byte-account rationale lost to
     // the honest-run contract's refusal: nothing-was-enforced must be loud,

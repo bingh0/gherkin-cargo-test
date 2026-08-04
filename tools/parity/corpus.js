@@ -8,6 +8,36 @@ const A = {}; // expected-accept-ish (either way, both must agree)
 const R = {}; // expected-reject-ish
 
 // --- core grammar ---------------------------------------------------------------
+A['pre-feature-prose'] = `billing rules, per compliance
+Feature: F
+  Scenario: S
+    Given a
+    Then b
+`;
+A['near-miss-above-feature'] = `Feature : almost
+Feature: F
+  Scenario: S
+    Given a
+    Then b
+`;
+A['strict-tags-and-prose'] = `@skip
+Feature: F
+  Scenario: hidden
+    Given a counter at 0
+    the balance must never go negative
+    Then the counter is 0
+
+  @only
+  Scenario: favored
+    Given a counter at 0
+    Then the counter is 0
+
+  @todo
+  Scenario: declared
+    Given a counter at 0
+    Then the counter is 0
+`;
+
 A['basic'] = `Feature: Counter
   As a tester
   I want arithmetic

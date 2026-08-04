@@ -689,6 +689,28 @@ fn dropped_prose_never_doubles_up_on_a_near_miss_line() {
 }
 
 #[test]
+fn dropped_prose_flags_prose_above_the_feature_line_with_its_own_remedy() {
+    let findings = lint_feature(
+        "billing rules, per compliance\nFeature: F\nScenario: S\n  Given a\n  Then b\n",
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["dropped-prose"]);
+    assert_eq!(findings[0].line, 1);
+    assert!(findings[0].message.contains("precedes the Feature: line"));
+    assert!(findings[0].message.contains("# comment"));
+}
+
+#[test]
+fn dropped_prose_leaves_a_construct_near_miss_above_feature_to_near_miss() {
+    let findings = lint_feature(
+        "Feature : almost\nFeature: F\nScenario: S\n  Given a\n  Then b\n",
+        "<feature>",
+    );
+    assert_eq!(rules(&findings), ["near-miss-keyword"]);
+    assert_eq!(findings[0].line, 1);
+}
+
+#[test]
 fn dropped_prose_exempts_feature_narrative_and_comments() {
     let findings = lint_feature(
         concat!(

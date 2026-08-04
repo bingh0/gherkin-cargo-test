@@ -34,7 +34,10 @@
 //!                       skip means "don't run", never "don't bind"); @todo is
 //!                       inverted (xfail): the scenario runs, an expected
 //!                       failure is printed and gates nothing, and a @todo
-//!                       that PASSES fails the run naming the stale tag; tags
+//!                       that PASSES fails the run naming the stale tag
+//!                       (trials keep the [todo] kind label — the node
+//!                       sibling's runtimes have no marker for plain tests;
+//!                       accepted asymmetry, ratified 2026-08-03); tags
 //!                       on Feature: apply to all its scenarios; all other tags
 //!                       (e.g. @AC3) are carried but have no effect. @only is
 //!                       REJECTED loudly — use `cargo test <name filter>`.
@@ -170,6 +173,9 @@ pub struct NarrativeLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFeature {
     pub feature: String,
+    /// 1-based line of the `Feature:` header — the boundary the linter's
+    /// pre-Feature dropped-prose check reads.
+    pub feature_line: usize,
     pub background: Vec<Step>,
     pub scenarios: Vec<Scenario>,
     pub outlines: Vec<OutlineMeta>,
@@ -777,6 +783,7 @@ pub fn parse_feature(text: &str, filename: &str) -> Result<ParsedFeature, Gherki
     }
     Ok(ParsedFeature {
         feature,
+        feature_line,
         background,
         scenarios,
         outlines,
@@ -1328,8 +1335,27 @@ fn lint_feature_impl(text: &str, filename: &str, strict: bool) -> Vec<LintFindin
     // the sharper diagnosis, and one finding per dropped line is the
     // accounting contract. Message text is byte-identical to the node
     // sibling.
+    // Lines ABOVE the Feature: header are covered too (ratified 2026-08-03,
+    // owner queue): they are under no Feature, so the narrative exemption
+    // does not apply — only tags and # comments live up there.
     for n in &parsed.narrative {
-        if !n.in_body || near_missed.contains(&n.line) {
+        if near_missed.contains(&n.line) {
+            continue;
+        }
+        if n.line < parsed.feature_line {
+            warn(
+                &mut findings,
+                &mut seen,
+                LintRule::DroppedProse,
+                n.line,
+                format!(
+                    "\"{}\" precedes the Feature: line — the parser drops it silently and it enforces nothing; move it below the Feature: header, or make it a # comment",
+                    n.text
+                ),
+            );
+            continue;
+        }
+        if !n.in_body {
             continue;
         }
         warn(
@@ -2137,11 +2163,11 @@ fn feature_trials<W: Default + 'static>(
             }));
             continue;
         }
-        // Manifest statuses for @skip and @todo come from the TAG, never the
-        // body — these trials' bodies run in some modes and not others
-        // (`--include-ignored` executes a parked @skip body; @todo runs every
-        // time), and a status that varied by run mode would break the
-        // bytes-follow-results rule. See ManifestRecorder.
+        // The @skip status comes from the TAG, never the body — a parked
+        // @skip body still runs under `--include-ignored`, and a status that
+        // varied by run mode would break the bytes-follow-results rule.
+        // (@todo records from execution — see the trial arms below.) See
+        // ManifestRecorder.
         if sc.tags.iter().any(|t| t == "@skip") {
             if let Some(r) = &recorder {
                 r.record_static(&file, &sc.name, "skipped");
@@ -2159,19 +2185,19 @@ fn feature_trials<W: Default + 'static>(
             continue;
         }
         let todo = sc.tags.iter().any(|t| t == "@todo");
-        if todo {
-            if let Some(r) = &recorder {
-                r.record_static(&file, &sc.name, "todo");
-            }
-        }
         let reg = Arc::clone(&reg);
         let file = file.clone();
         let trial_title = title.clone();
-        // Only a plain bound scenario records from execution. Its slot is
-        // reserved at build; the last slot to land writes the manifest, and a
-        // write failure surfaces as that trial's failure unless the scenario
-        // itself failed (which outranks it).
-        let trial_recorder = if todo { None } else { recorder.clone() };
+        // Plain bound scenarios AND @todo trials record from execution — the
+        // inversion runs the @todo body on every run, so its row is
+        // deterministic: 'todo' while the declared debt still fails, and
+        // 'failed' when the tag has gone stale, so a red run's account
+        // explains itself (ratified 2026-08-03, owner queue; lockstep with
+        // the node sibling's wrap mapping). The slot is reserved at build;
+        // the last slot to land writes the manifest, and a write failure
+        // surfaces as that trial's failure unless the scenario itself failed
+        // (which outranks it).
+        let trial_recorder = recorder.clone();
         if let Some(r) = &trial_recorder {
             r.begin_trial();
         }
@@ -2180,10 +2206,17 @@ fn feature_trials<W: Default + 'static>(
             match execute_steps(&steps, &reg, W::default()) {
                 // The stale half of the @todo inversion, checked FIRST: the
                 // run that would silently turn a declared expected-fail
-                // green goes red instead, naming the tag.
-                Ok(_) if todo => Err(Failed::from(format!(
-                    "{file}: @todo scenario \"{scenario_name}\" now passes — the tag is stale; remove @todo so the scenario gates the run"
-                ))),
+                // green goes red instead, naming the tag — and the row is
+                // the failure the account must explain, never a green-
+                // looking declaration.
+                Ok(_) if todo => {
+                    if let Some(r) = &trial_recorder {
+                        let _ = r.finish_trial(&file, &scenario_name, "failed");
+                    }
+                    Err(Failed::from(format!(
+                        "{file}: @todo scenario \"{scenario_name}\" now passes — the tag is stale; remove @todo so the scenario gates the run"
+                    )))
+                }
                 Ok(_) => {
                     if let Some(r) = &trial_recorder {
                         r.finish_trial(&file, &scenario_name, "passed")
@@ -2194,6 +2227,10 @@ fn feature_trials<W: Default + 'static>(
                 Err(e) if todo => {
                     let first = e.lines().next().unwrap_or("");
                     eprintln!("@todo \"{trial_title}\" fails as declared — gating nothing until it passes: {first}");
+                    if let Some(r) = &trial_recorder {
+                        r.finish_trial(&file, &scenario_name, "todo")
+                            .map_err(Failed::from)?;
+                    }
                     Ok(())
                 }
                 Err(e) => {
