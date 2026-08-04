@@ -265,10 +265,13 @@ fn main() {
         &mut failures,
         "stale @todo records failed, run red",
         c.num_failed == 1 && got == stale_expected,
-        format!("failed={} got:
+        format!(
+            "failed={} got:
 {got}
 expected:
-{stale_expected}", c.num_failed),
+{stale_expected}",
+            c.num_failed
+        ),
     );
 
     // 0.9.0: an empty feature directory is REFUSED — one failing trial, no

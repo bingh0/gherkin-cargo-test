@@ -675,7 +675,9 @@ fn dropped_prose_warns_with_the_line_text_in_the_message() {
     assert_eq!(rules(&findings), ["dropped-prose"]);
     assert_eq!(findings[0].severity, LintSeverity::Warn);
     assert_eq!(findings[0].line, 4);
-    assert!(findings[0].message.contains("\"the balance must never go negative\" is not a step"));
+    assert!(findings[0]
+        .message
+        .contains("\"the balance must never go negative\" is not a step"));
     assert!(findings[0].message.contains("# comment"));
 }
 
@@ -744,7 +746,10 @@ fn strict_promotes_every_warning_nothing_reworded_or_dropped() {
     let strict = lint_feature_strict(&text, "x.feature");
     let promoted: Vec<LintFinding> = dflt
         .iter()
-        .map(|f| LintFinding { severity: LintSeverity::Error, ..f.clone() })
+        .map(|f| LintFinding {
+            severity: LintSeverity::Error,
+            ..f.clone()
+        })
         .collect();
     assert_eq!(strict, promoted);
 }
@@ -752,13 +757,24 @@ fn strict_promotes_every_warning_nothing_reworded_or_dropped() {
 #[test]
 fn strict_tag_flags_skip_and_only_only_in_strict_mode() {
     for tag in ["@skip", "@only"] {
-        let text = feat(&format!("{tag}\nScenario: S\n  Given a counter at 0\n  Then the counter is 0\n"));
-        assert!(lint_feature(&text, "x.feature").is_empty(), "{tag} lints clean in default mode");
+        let text = feat(&format!(
+            "{tag}\nScenario: S\n  Given a counter at 0\n  Then the counter is 0\n"
+        ));
+        assert!(
+            lint_feature(&text, "x.feature").is_empty(),
+            "{tag} lints clean in default mode"
+        );
         let strict = lint_feature_strict(&text, "x.feature");
-        assert_eq!(rules(&strict), ["strict-tag"], "{tag} is flagged in strict mode");
+        assert_eq!(
+            rules(&strict),
+            ["strict-tag"],
+            "{tag} is flagged in strict mode"
+        );
         assert_eq!(strict[0].severity, LintSeverity::Error);
         assert_eq!(strict[0].line, 3, "reported at the tagged construct header");
-        assert!(strict[0].message.contains(&format!("tag \"{tag}\" has no place in reviewed output")));
+        assert!(strict[0]
+            .message
+            .contains(&format!("tag \"{tag}\" has no place in reviewed output")));
     }
 }
 
@@ -783,7 +799,10 @@ fn strict_tag_fires_once_per_construct_not_per_expanded_row() {
         "@skip\nScenario Outline: add <n>\n  When I add <n>\n  Then the counter is <n>\n",
         "  Examples:\n    | n |\n    | 1 |\n    | 2 |\n    | 3 |\n",
     ));
-    assert_eq!(rules(&lint_feature_strict(&text, "x.feature")), ["strict-tag"]);
+    assert_eq!(
+        rules(&lint_feature_strict(&text, "x.feature")),
+        ["strict-tag"]
+    );
 }
 
 #[test]
