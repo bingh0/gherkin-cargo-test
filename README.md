@@ -17,7 +17,7 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.7"   # or just vendor src/lib.rs; it's one file
+gherkin-cargo-test = "0.9"   # or just vendor src/lib.rs; it's one file
 
 [[test]]
 name = "features"
@@ -264,14 +264,23 @@ carries the full rules):
   absolute feature-dir argument never leaks machine paths into committed
   bytes, and downstream joins stay portable.
 - **Statuses are run-mode-independent.** `passed`/`failed` come from
-  execution; `skipped` (@skip), `todo` (@todo), and `unbound` come from
-  *registration* — a normal run and an `--include-ignored` run write
-  identical bytes, even though the latter executes parked bodies.
+  execution; `skipped` (@skip) and `unbound` come from *registration* — a
+  normal run and an `--include-ignored` run write identical bytes, even
+  though the latter executes parked bodies. `todo` comes from execution
+  too, safely: the @todo inversion runs on every mode, so the row is
+  deterministic — `todo` means *declared and still failing*, and a stale
+  @todo (one that passes) writes `failed`, so a red run's account explains
+  the red.
+- **Every account opens with `{"run-manifest":1}`** — an in-band schema
+  declaration, so the file explains itself with no other context. The key
+  names the format, not the tool: the node sibling writes byte-identical
+  accounts. The version bumps only on a change that would mislead a
+  version-1 reader.
 - **A partial run never writes.** The file is written exactly once, when
   every scenario's outcome has been observed. A name-filtered, `--list`, or
-  `--ignored` run leaves the previous manifest untouched. A directory that
-  registers zero scenarios writes a zero-byte file — visibly empty is an
-  account; an absent file would read as "never ran". A feature that fails to
+  `--ignored` run leaves the previous manifest untouched. An empty feature
+  directory is refused outright (one failing trial naming the path — a
+  zero-scenario run must be loud, not a green file). A feature that fails to
   read or parse disables the writer entirely: an account omitting its rows
   would be absence-shaped.
 - **cargo-nextest is refused loudly.** The manifest needs one process to
@@ -367,7 +376,7 @@ better feature files.
 | `<placeholder>` | substituted from the Examples columns — in step text **and** step data tables; every `<name>` must match a column |
 | Steps | `Given` `When` `Then` `And` `But` `*`, followed by step text |
 | Step data tables | `\|` rows after a step attach to it; the step closure receives an **`Option<&DataTable>`** as its last argument |
-| Tags | `@skip` → trial ignored (steps must still bind); `@todo` → runs, failure tolerated; `@only` → **rejected loudly** (use `cargo test -- '<filter>'`); the three are **mutually exclusive — combining them is a parse error**; tags on `Feature:` apply to all its scenarios; any other tag is carried on `scenario.tags` with no runtime effect |
+| Tags | `@skip` → trial ignored (steps must still bind); `@todo` → inverted: runs, expected to fail (failure printed, gates nothing) — a *passing* @todo fails the run naming the stale tag; `@only` → **rejected loudly** (use `cargo test -- '<filter>'`); the three are **mutually exclusive — combining them is a parse error**; tags on `Feature:` apply to all its scenarios; any other tag is carried on `scenario.tags` with no runtime effect |
 | `# comment` | ignored anywhere |
 | Feature narrative | the `As a… / I want… / So that…` prose block is ignored |
 
@@ -491,7 +500,7 @@ different, and each one is deliberate:
 | Node | Rust | Why |
 |---|---|---|
 | dynamic `world` object | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the compiler now catches world-shape mistakes the JS version can't |
-| `@todo` → node:test `todo` | runs; failure printed and **tolerated** (trial kind `todo`) | libtest has no todo concept; this preserves "runs but doesn't gate" |
+| `@todo` → plain test, inverted (xfail) | same inversion, with a `[todo]` trial kind label | since 0.9.0 the siblings share the inversion (runs everywhere; failure printed, gates nothing; a *passing* @todo is red naming the stale tag). The label is the one ratified asymmetry: libtest-mimic supports kind markers, the JS runtimes have none for plain tests |
 | unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
@@ -515,12 +524,15 @@ Findings carry `rule` / `severity` / `line` / `message`:
 | Rule | Severity | Fires on |
 |---|---|---|
 | `dialect` | error | anything the rejection table above rejects — the exact `GherkinSyntaxError`, as a finding (the parser stops at the first violation, so it arrives alone) |
+| `no-scenarios` | error | a `Feature:` header with no scenarios under it — the file enforces nothing and reads as passing. The same parser refusal as `dialect`, under its own rule name: "add a scenario or delete the file" is a different remedy than "fix this line" |
 | `no-then` | warn | a scenario whose steps never resolve to `Then` — runs code, asserts nothing (`And`/`But`/`*` inherit the preceding primary keyword, across a `Background`) |
 | `vague-then` | warn | a `Then`-resolved step containing *works · correctly · properly · as expected · handles · appropriate* — words that assert nothing checkable |
 | `single-row-outline` | warn | a `Scenario Outline` with one `Examples` row — a scenario with extra ceremony, and usually a missing case |
 | `near-miss-keyword` | warn | a silently dropped line that was almost certainly meant as syntax: a wrong-case step keyword inside a scenario or `Background` body (`when I add 5`, `GIVEN a counter`), or — anywhere — a construct header that isn't the one exact form the parser recognizes (`scenario: b`, `Scenario : b`, `SCENARIO OUTLINE: b`) |
+| `dropped-prose` | warn | any *other* line inside a scenario, outline, or `Background` body that the parser dropped as narrative — and any non-tag, non-comment line *above* the `Feature:` header. The floor under `near-miss-keyword`: no dropped line goes unaccounted. The `Feature` narrative (below the header) stays exempt |
 | `duplicate-title` | error | a `Scenario` or `Scenario Outline` title already used earlier in the file — compared pre-expansion, because two outlines sharing a title expand to **byte-identical** trial names (the `[n]` suffix indexes rows within one outline, not across outlines); a post-expansion backstop catches source-distinct collisions (`adds 1 [1]`). An error because the runner refuses it too: a failing trial (the `@only` mechanism, additive — both copies still run), since a duplicated title silently breaks `cargo test -- '<substring>'` focus |
 | `unused-column` | warn | an `Examples` column no `<placeholder>` in the outline's title, steps, or step tables ever references — a case someone wrote down that no assertion consumes. Reported at the header row's line; a warn because a leading label column kept for the human reader is legitimate style |
+| `strict-tag` | error (strict only) | a `@skip` or `@only` tag, under `lint_feature_strict`. Reviewed output carries no silent debt or focus. `@todo` is deliberately exempt — the stale-@todo inversion polices it at *run* time |
 
 `near-miss-keyword` is the counterpart to the near-miss *tag* the parser
 already rejects outright (`@Skip`, `@Only`): keywords are exact, and anything
@@ -533,9 +545,16 @@ parse itself (`ParsedFeature.narrative`), so what the linter checks and what
 the parser drops cannot drift apart. `Rule:` is exempt: its exact form is
 itself a `dialect` error in this subset, so a near miss is not a rescue.
 
+**Strict mode** is one bit: `lint_feature_strict(text, filename)` promotes
+every warning to an error — same rule, same line, same message, nothing
+removed or reworded — and adds the strict-only `strict-tag` rule. A
+strict-clean file is clean in default mode by construction; there is no
+relaxed mode. New rules enter only through the four admission tests of the
+node sibling's `docs/lint-admission.md`, which binds this crate in lockstep.
+
 Severity is descriptive, not policy: the wip-style debt register (filter by
 rule) belongs in your guard test. Finding **text** is identical to
-gherkin-node-test 0.7.0's `lintFeature` — the two linters are held together
+gherkin-node-test 0.9.0's `lintFeature` — the two linters are held together
 differentially by `tools/parity` (byte-for-byte finding streams over shared
 corpora and fuzzing), so a feature corpus linted here means the same thing
 linted there. That is also why the `duplicate-title` message says
