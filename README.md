@@ -3,7 +3,7 @@
 **The smallest honest Gherkin runner for Rust.** Two boring dependencies, no
 proc macros, no async, no framework — it turns `.feature` files into real
 `cargo test` tests (one per scenario, via [libtest-mimic]), and it treats
-every silence as a bug. One file, ~2,000 lines, small enough to read in one
+every silence as a bug. One file, ~2,600 lines, small enough to read in one
 sitting or to vendor outright. The same file doubles as a **feature-file
 linter** for projects whose runner is something else — see
 [the linter role](#the-linter-role--under-someone-elses-runner).

@@ -75,3 +75,10 @@ pinning covers the near-miss scans only, deliberately: re-pinning the trim
 itself would touch every line of every parse for a character class no real
 corpus contains. Neither fuzzer alphabet includes NEL/U+FEFF, so parity runs
 stay green; this note is the honest record that the class exists.
+
+Status 2026-08-04 (0.9.0), recorded 2026-08-22: the ledger skipped 0.7.0
+and 0.8.0 — that growth (144 → 225 case-modes) lives only in commit
+history (`1545354` at 216, `ce3b81b` at 225). The corpus is now 75 curated
+cases × 3 modes = **225 case-modes**. Re-run 2026-08-22 against node 0.9.0
+(whose shipped parser is byte-identical to its `v0.9.0` tag) vs cargo
+0.9.0: 225/225 identical (ast + lint + strict per case), zero divergence.
