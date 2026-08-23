@@ -3,7 +3,7 @@
 // including the --lint mode (FINDING lines; finding text is part of the
 // parity contract).
 const { readFileSync } = require('node:fs');
-const { parseFeature, lintFeature, GherkinSyntaxError } = require(process.env.GNT_PATH || '/home/biho/Documents/gherkin-node-test/index.js');
+const { parseFeature, lintFeature, GherkinSyntaxError } = require(process.env.GNT_PATH || require('node:path').join(__dirname, '..', '..', '..', 'gherkin-node-test', 'index.js'));
 
 const esc = (s) => s.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n');
 

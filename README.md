@@ -17,7 +17,7 @@ between the two: Gherkin is the language-neutral control layer.
 
 ```toml
 [dev-dependencies]
-gherkin-cargo-test = "0.9"   # or just vendor src/lib.rs; it's one file
+gherkin-cargo-test = "0.10"   # or just vendor src/lib.rs; it's one file
 
 [[test]]
 name = "features"
@@ -499,7 +499,7 @@ different, and each one is deliberate:
 
 | Node | Rust | Why |
 |---|---|---|
-| dynamic `world` object | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the compiler now catches world-shape mistakes the JS version can't |
+| opt-in typed world since 0.10.0 (`StepRegistry<W>`, type-level: the world is still born `{}`, its shape accreted by steps) | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the deviation narrowed at 0.10.0: node types the world too, checked only by the consumer's own tsc. What remains deliberate is construction and enforcement — Rust builds `W::default()` per scenario and the compiler enforces the shape at build |
 | `@todo` → plain test, inverted (xfail) | same inversion, with a `[todo]` trial kind label | since 0.9.0 the siblings share the inversion (runs everywhere; failure printed, gates nothing; a *passing* @todo is red naming the stale tag). The label is the one ratified asymmetry: libtest-mimic supports kind markers, the JS runtimes have none for plain tests |
 | unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
