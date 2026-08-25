@@ -79,6 +79,41 @@ fn main() {
         0,
     );
 
+    // The unused-definition guard (the wip ratchet's dual, node gh#5): one
+    // definition no scenario consumes registers one failing trial naming it;
+    // every other trial still passes — additive, the @only mechanism.
+    check(
+        &mut failures,
+        "unused-definition",
+        run(Features::new("tests/fixtures/good").feature(
+            "counter",
+            |reg: &mut StepRegistry<World>| {
+                value_steps(reg);
+                reg.define_exact("a definition nobody consumes", |_, _, _| {});
+            },
+        )),
+        3, // orphan guard + binding guard + 1 scenario — all still pass
+        1, // the consumer guard fails, naming the dead definition
+        0,
+    );
+
+    // A wip-held scenario still consumes its bound steps — and the bound
+    // consumer is deliberately the LAST step, behind an unbound one, so an
+    // early-exit rewrite of the preflight could not have counted it
+    // incidentally (the node sibling's mutation-verified lesson).
+    check(
+        &mut failures,
+        "wip-consumer",
+        run(Features::new("tests/fixtures/wipconsumer")
+            .feature("gauges", |reg: &mut StepRegistry<World>| {
+                reg.define(r"^the last gauge reads (\d+)$", |_, _, _| {});
+            })
+            .wip("gauges")),
+        2, // orphan guard + (relaxed) binding guard — no consumer guard fires
+        0,
+        1, // the wip scenario itself stays parked (unbound first step)
+    );
+
     // An unbound step: the binding guard FAILS (with a paste-ready snippet)
     // and the unbound scenario registers as ignored — never silently green.
     check(

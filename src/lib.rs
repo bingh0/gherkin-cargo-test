@@ -13,7 +13,9 @@
 //! OWN typed World (step patterns and world state never leak between features),
 //! and registers guard trials that fail on ambiguous steps, on unbound steps
 //! (which would otherwise register as ignored — reported GREEN by the runner),
-//! and on definer keys that match no feature file. A feature still being
+//! on definitions no scenario consumes (the wip ratchet's dual — deletion is
+//! the remedy; a spec-first consumer scenario held in wip is the sanctioned
+//! keep), and on definer keys that match no feature file. A feature still being
 //! bootstrapped opts out of the unbound-step ratchet by name via `.wip(base)`.
 //! `.manifest(path)` opts into the run manifest — a committed record of what
 //! ran, one sorted `{file, title, status}` row per scenario (see
@@ -2106,6 +2108,48 @@ fn feature_trials<W: Default + 'static>(
             format!("{base} :: scenario titles must be unique"),
             move || Err(Failed::from(msg)),
         ));
+    }
+
+    // A definition no scenario consumes is dead code in the step layer — the
+    // wip ratchet's dual: wip catches scenarios without definitions; this
+    // catches definitions without scenarios (mirrors the node sibling, its
+    // gh#5). Counting is an explicit pass of its own over EVERY scenario —
+    // @skip'd, @todo'd, and wip-held rows included — at build time, which no
+    // run-time filter can skip; it must never ride along inside the
+    // unbound-step preflight (an early-exit rewrite there would silently
+    // stop counting for wip-held rows). A definition matched by an ambiguous
+    // step still counts as consumed: ambiguity carries its own refusal, and
+    // the remedy here must stay unique — delete the definition, or write the
+    // scenario it serves. (Trial-failure text is runner-specific and not
+    // parity-compared, per the duplicate-titles precedent.)
+    {
+        let mut consumed = vec![false; reg.defs.len()];
+        for sc in &parsed.scenarios {
+            for step in parsed.background.iter().chain(sc.steps.iter()) {
+                for (i, (re, _)) in reg.defs.iter().enumerate() {
+                    if re.is_match(&step.text) {
+                        consumed[i] = true;
+                    }
+                }
+            }
+        }
+        let unused: Vec<&str> = reg
+            .defs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !consumed[*i])
+            .map(|(_, (re, _))| re.as_str())
+            .collect();
+        if !unused.is_empty() {
+            let msg = format!(
+                "{file}: unused step definition(s) registered by the \"{base}\" definer: {} — matched by no scenario step; delete the definition, or restore the scenario meant to consume it (a spec-first consumer can be held in the wip register while the code catches up)",
+                unused.join("; ")
+            );
+            trials.push(Trial::test(
+                format!("{base} :: every definition has a consumer"),
+                move || Err(Failed::from(msg)),
+            ));
+        }
     }
 
     for sc in &parsed.scenarios {

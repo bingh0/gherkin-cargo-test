@@ -212,10 +212,16 @@ Under a wip'd feature, the ignored trials you see are exactly the ones the
 register declares — a reviewer can tell "intentionally pending" from
 "someone broke a binding" by grepping the entry.
 
-Two companion rules seal the ratchet's other entrances: the orphan-definer
-guard (renaming a `.feature` file can't silently strand its steps), and
+Three companion rules seal the ratchet's other entrances: the orphan-definer
+guard (renaming a `.feature` file can't silently strand its steps),
 skip-still-binds (`@skip` means "don't run", never "don't bind" — otherwise a
-tag would be a hole in the ratchet).
+tag would be a hole in the ratchet), and the unused-definition guard, the
+ratchet's dual: a definition no scenario consumes is a failing trial naming
+the pattern and its feature. The pair holds the ledger taut from both sides —
+the ratchet catches scenarios without definitions, the guard catches
+definitions without scenarios; the guard carries no register of its own,
+because the sanctioned way to keep a definition is to write the scenario it
+serves and hold *that* in the wip register.
 
 The ratchet is also this crate's honest replacement for tag-based scenario
 exclusion (cucumber's `excludeTags`): scenarios awaiting data or a pending
@@ -501,6 +507,7 @@ different, and each one is deliberate:
 |---|---|---|
 | opt-in typed world since 0.10.0 (`StepRegistry<W>`, type-level: the world is still born `{}`, its shape accreted by steps) | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the deviation narrowed at 0.10.0: node types the world too, checked only by the consumer's own tsc. What remains deliberate is construction and enforcement — Rust builds `W::default()` per scenario and the compiler enforces the shape at build |
 | `@todo` → plain test, inverted (xfail) | same inversion, with a `[todo]` trial kind label | since 0.9.0 the siblings share the inversion (runs everywhere; failure printed, gates nothing; a *passing* @todo is red naming the stale tag). The label is the one ratified asymmetry: libtest-mimic supports kind markers, the JS runtimes have none for plain tests |
+| invoke-time **args-consumption guard**: the callback signature must declare exactly what the sentence produces (captures + table), defaults refused, rest-form exempt | **no guard — the class is unrepresentable**: `args: &[String]` is a slice by construction and the table is an explicit `Option<&DataTable>` parameter; a Rust signature cannot under- or over-declare what arrives | accepted asymmetry, ratified 2026-08-24 (node gh#4 item (a)): the guard exists because JavaScript signatures can lie about consumption; Rust's cannot, so there is nothing to refuse |
 | unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |

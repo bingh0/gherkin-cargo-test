@@ -179,8 +179,12 @@ fn main() {
     )
     .expect("write inside.feature");
     let m_in = out("inside.ndjson");
+    // Exactly the one definition the one-step feature consumes — the full
+    // mixed_steps definer would leave three dead and trip the consumer guard.
     let c = run(Features::new(&inside_dir)
-        .feature("inside", mixed_steps)
+        .feature("inside", |reg: &mut StepRegistry<World>| {
+            reg.define_exact("a bound step", |_, _, _| {});
+        })
         .manifest(&m_in));
     let inside_expected = concat!(
         "{\"run-manifest\":1}\n",
