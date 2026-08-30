@@ -5,7 +5,7 @@
 const { writeFileSync, mkdirSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { join } = require('node:path');
-const { parseFeature, lintFeature, GherkinSyntaxError } = require(process.env.GNT_PATH || '/home/biho/Documents/gherkin-node-test/index.js');
+const { parseFeature, lintFeature, GherkinSyntaxError } = require(process.env.GNT_PATH || join(__dirname, '..', '..', '..', 'gherkin-node-test', 'index.js'));
 
 const COUNT = Number(process.argv[2] || 1000);
 let seed = Number(process.argv[3] || 20260716);
