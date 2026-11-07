@@ -508,7 +508,7 @@ different, and each one is deliberate:
 | opt-in typed world since 0.10.0 (`StepRegistry<W>`, type-level: the world is still born `{}`, its shape accreted by steps) | **typed `World` per feature** (`StepRegistry<W>`, `W::default()` per scenario) | the deviation narrowed at 0.10.0: node types the world too, checked only by the consumer's own tsc. What remains deliberate is construction and enforcement — Rust builds `W::default()` per scenario and the compiler enforces the shape at build |
 | `@todo` → plain test, inverted (xfail) | same inversion, with a `[todo]` trial kind label | since 0.9.0 the siblings share the inversion (runs everywhere; failure printed, gates nothing; a *passing* @todo is red naming the stale tag). The label is the one ratified asymmetry: libtest-mimic supports kind markers, the JS runtimes have none for plain tests |
 | invoke-time **args-consumption guard**: the callback signature must declare exactly what the sentence produces (captures + table), defaults refused, rest-form exempt | **no guard — the class is unrepresentable**: `args: &[String]` is a slice by construction and the table is an explicit `Option<&DataTable>` parameter; a Rust signature cannot under- or over-declare what arrives | accepted asymmetry, ratified 2026-08-24 (node gh#4 item (a)): the guard exists because JavaScript signatures can lie about consumption; Rust's cannot, so there is nothing to refuse |
-| `lintStepDefinitionSource` — step-source lint (unearned-absence on literal-needle negations, rest-signature sightings, statement-attached sanction markers with stale-sighting) | **no lint — but not because the class is unrepresentable**: the shipped forms are JavaScript assertion dialects, and Rust does close two species by construction (`Option` must be handled; worlds are typed structs) — yet `assert!(!out.contains("wrong needle"))` rots in Rust exactly as in JS, and clippy does not sight needles | accepted asymmetry with a stated revisit condition (errata 2026-08-25): the in-house Rust step corpus measures ZERO negation-shaped assertions today, so a Rust-dialect rule has no data to earn a default with — the same loudness discipline that gated the JS default. A Rust step corpus that accumulates absence assertions reopens this row |
+| `lintStepDefinitionSource` — step-source lint (unearned-absence on literal-needle negations, rest-signature sightings, statement-attached sanction markers with stale-sighting) | **no lint — but not because the class is unrepresentable**: the shipped forms are JavaScript assertion dialects, and Rust does close two species by construction (`Option` must be handled; worlds are typed structs) — yet `assert!(!out.contains("wrong needle"))` rots in Rust exactly as in JS, and clippy does not sight needles | accepted asymmetry, re-measured 2026-11-07 when its revisit condition (errata 2026-08-25: a Rust step corpus that accumulates absence assertions) was met. One in-house Rust corpus (495 definitions) carries 54 needle-shaped absence assertions, plus 32 needle negations in plain predicates. A literal-needle default would fire 16 times (3.2%), or 34 (6.9%) counting a project `assert_lacks(text, "needle", …)` helper, which a port would see only through node's `config.rules`. One fire found an unearned needle: an external UI string with no positive control. But it fired on a redundant `Then`. The load-bearing copy sat in a readiness predicate (`if … && !text.contains("…")`), which an assertion-dialect rule cannot see. A Rust default rule still has no data to earn admission. The row reopens on a corpus where literal-needle fires find unearned absences that matter |
 | unbound scenario → node:test TODO | unbound scenario → **ignored trial** (kind `unbound`) whose body **fails with its reason** | same visibility, same ratchet: the binding guard fails the suite unless `.wip()`; and `cargo test -- --include-ignored` can't turn parked debt into a vacuous pass |
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
@@ -568,6 +568,73 @@ corpora and fuzzing), so a feature corpus linted here means the same thing
 linted there. That is also why the `duplicate-title` message says
 "name-filter selection" rather than naming either runner's flag: the message
 is shared verbatim across siblings whose flags differ.
+
+### A guard test to paste
+
+The linter ships as a function, not a command. To make `cargo test` fail on
+lint findings, paste this into `tests/feature_lint.rs`. It needs nothing
+beyond this crate:
+
+```rust
+// tests/feature_lint.rs — every .feature file in FEATURES lints clean.
+use gherkin_cargo_test::lint_feature; // or lint_feature_strict
+use std::{fs, path::Path};
+
+const FEATURES: &str = "features"; // relative to the crate root
+
+// Known debt, by (file, rule) — e.g. ("features/legacy.feature", "no-then").
+// An entry that no longer fires fails the test, so the list can only shrink.
+const ALLOW: &[(&str, &str)] = &[];
+
+#[test]
+fn feature_files_lint_clean() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<_> = fs::read_dir(root.join(FEATURES))
+        .expect("read the features directory")
+        .map(|e| e.expect("read a directory entry").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "feature"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no .feature files in {FEATURES}/");
+
+    let (mut problems, mut used) = (Vec::new(), Vec::new());
+    for path in &files {
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let name = rel.display().to_string().replace('\\', "/"); // keys match on Windows too
+        let text = fs::read_to_string(path).expect("read a .feature file");
+        for f in lint_feature(&text, &name) {
+            let (sev, rule) = (f.severity.as_str(), f.rule.as_str());
+            if ALLOW.contains(&(name.as_str(), rule)) {
+                used.push((name.clone(), rule));
+            } else {
+                problems.push(format!("{name}:{}: {sev}[{rule}]: {}", f.line, f.message));
+            }
+        }
+    }
+    for (file, rule) in ALLOW {
+        if !used.iter().any(|(f, r)| f == file && r == rule) {
+            problems.push(format!(
+                "stale ALLOW entry ({file:?}, {rule:?}) — delete it"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
+}
+```
+
+Run it with `cargo test --test feature_lint`. A failure lists every finding
+as `file:line: severity[rule]: message`:
+
+```
+features/counter.feature:34: warn[no-then]: Scenario "skipped scenarios do not run" has no Then step — it runs code but asserts nothing
+```
+
+Every finding fails the test, warnings included. A warning you have decided
+to keep goes in `ALLOW`. The list works per file, like the runner's
+`.wip()`. Swap in `lint_feature_strict` to also reject committed `@skip` and
+`@only` tags. The walk is flat, like the runner's discovery: for a second
+directory (a `features/design/` tier, say), copy the test and change
+`FEATURES`.
 
 ## When *not* to use this
 
