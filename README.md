@@ -5,7 +5,8 @@ proc macros, no async, no framework — it turns `.feature` files into real
 `cargo test` tests (one per scenario, via [libtest-mimic]), and it treats
 every silence as a bug. One file, ~2,600 lines, small enough to read in one
 sitting or to vendor outright. The same file doubles as a **feature-file
-linter** for projects whose runner is something else — see
+linter** for projects whose runner is something else, with a `gct-lint`
+command to run it — see
 [the linter role](#the-linter-role--under-someone-elses-runner).
 
 This is the Rust sibling of [gherkin-node-test] — same author, same grammar,
@@ -519,6 +520,7 @@ different, and each one is deliberate:
 | zero dependencies | **two boring dependencies** (`regex`, `libtest-mimic`) | hand-rolling a regex engine or a test harness protocol would be its own foot-gun; zero-dep is a non-goal here |
 | throws on parse error at load | parse error becomes a **failing trial** (`base :: parses`) | sibling features still report; the suite is red either way |
 | lint findings carry plain strings (`rule`, `severity`); `filename` defaults to `<feature>` | **`LintRule` / `LintSeverity` enums** with `as_str()`; `filename` is explicit | the compiler exhaustiveness-checks rule matches that JS can't; the *string forms and finding text* are identical both sides, held together by `tools/parity` |
+| no command: the linter is `lintFeature` plus the README's guard test (recursive walk, `ALLOW` register, strict bit) | **`gct-lint`**, contract agreed with the node sibling 2026-11-08: recursive sorted walk skipping hidden dirs, `target/` and `node_modules/`; paths printed as typed, walked ones joined with `/`; `path:line: severity[rule]: message` on stdout, summary on stderr; exit 1 on any error, unreadable path or empty directory; `--strict` the one bit; no allow list | gct's beta testers asked for a command; gnt's have not, and its 0.4.0 record keeps the library off the filesystem, which the command leaves untouched. Reopens when a gnt user asks: gnt would then ship the same contract, so `tools/parity` can diff the two commands' stdout byte for byte |
 | `bindRunner(testFn)` + a `gherkin-node-test/vitest` adapter entry | **no analog** | node-only by nature: it rebinds registration onto a foreign JS runner's `test()`. The dialect and lint surface stay in lockstep; runner *hosting* is each sibling's own business |
 | manifest refuses a RE-INVOKED body (vitest retry/repeats re-run the same registered fn) | **no code** — libtest-mimic invokes each trial closure at most once, so the hazard is structurally unreachable | same doctrine, different fence: the cross-process cousin (nextest's one-test-per-process model) is what gets refused here, at build time via nextest's env vars |
 | manifest disabled by a parse error **at load** (validate-everything-first throws before registration) | manifest disabled by the parse failure **trial** (`base :: parses`; recorder disables itself, siblings still run) | same end — a run that failed validation never writes — reached through each sibling's own parse-failure channel |
@@ -575,11 +577,57 @@ linted there. That is also why the `duplicate-title` message says
 "name-filter selection" rather than naming either runner's flag: the message
 is shared verbatim across siblings whose flags differ.
 
+### From the command line: `gct-lint`
+
+The crate also installs a command that runs the linter over your files:
+
+```
+cargo install gherkin-cargo-test
+gct-lint                      # lints ./features
+gct-lint features/ extra.feature
+gct-lint --strict features/   # warnings become errors, plus strict-tag
+```
+
+It prints one line per finding on stdout, in the same form as the guard test
+below:
+
+```
+features/counter.feature:34: warn[no-then]: Scenario "skipped scenarios do not run" has no Then step — it runs code but asserts nothing
+```
+
+A summary (`gct-lint: 3 files, 0 errors, 1 warning`) goes to stderr, so
+stdout holds only findings.
+
+- **Paths.** Each path is a `.feature` file or a directory. Directories are
+  walked recursively in sorted order, skipping hidden directories,
+  `target/` and `node_modules/`. Symlinked directories are not followed. A
+  file you name is linted whatever its extension and printed exactly as
+  typed. A walked file is printed as the argument you typed, then `/`, then
+  its path below it, with no other normalization (`./features` stays
+  `./features`).
+- **Exit status.** `0` when no finding is an error, so warnings alone pass.
+  `1` on any error finding, an unreadable path, or a directory with no
+  `.feature` files: a typo'd path never reads as a pass. `2` on an unknown
+  option.
+- **Strict.** `--strict` is the one bit that makes warnings fail. It runs
+  `lint_feature_strict`, nothing else changes.
+- **One dialect line per file.** The parser stops at the first `dialect` or
+  `no-scenarios` fault, so a broken file prints one line, not every fault in
+  it.
+- **No allow list.** Known debt belongs in a guard test's `ALLOW` register,
+  next to the test that enforces it.
+
+The command is a thin shell over `lint_feature`: it adds file handling and
+an exit code, never different findings. The library function still never
+touches the filesystem. The node sibling has no command yet, but this
+contract was agreed with it so that a later `gnt-lint` would print the same
+stdout for the same tree.
+
 ### A guard test to paste
 
-The linter ships as a function, not a command. To make `cargo test` fail on
-lint findings, paste this into `tests/feature_lint.rs`. It needs nothing
-beyond this crate:
+To make `cargo test` itself fail on lint findings, with a register for known
+debt, paste this into `tests/feature_lint.rs`. It needs nothing beyond this
+crate:
 
 ```rust
 // tests/feature_lint.rs — every .feature file in FEATURES lints clean.
@@ -662,6 +710,7 @@ loud by construction.
 | `Features::build_trials()` | the same trials without running them (the guards are testable — see `tests/guards-proof.rs`) |
 | `parse_feature(text, filename)` | parse → `ParsedFeature` (incl. `outlines: Vec<OutlineMeta>`); `Err(GherkinSyntaxError)` on unsupported/malformed syntax |
 | `lint_feature(text, filename)` | **linter**: dialect gate + spec lints as `Vec<LintFinding>` — pure text-in/findings-out, for use under another runner |
+| `gct-lint [--strict] [PATH]...` | **command**: the linter over files and directories, one `path:line: severity[rule]: message` line per finding; exits 1 on any error finding (see [From the command line](#from-the-command-line-gct-lint)) |
 | `StepRegistry<W>` | `.define(regex_src, fn)` / `.define_exact(text, fn)` / `.find(text)` / `.matching(text)` |
 | `execute_steps(steps, &registry, world)` | run a flat step list against a world (LIFO `defer` cleanup included) |
 | `check_bindings(&parsed, &registry, base, wip)` | the pure binding guard (ambiguity + unbound-step ratchet) |
