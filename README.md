@@ -74,6 +74,12 @@ runs normally).
 
 [cargo-nextest]: https://nexte.st
 
+The guards above are the mechanical floor. How a suite lies *above* that
+floor — green and hollow (`cino:`, completion in name only) versus never
+written at all (`blind:`) — is mapped once, with an address, a tell, a
+catch and dated specimens, in the JS sibling's
+[failure ladder](https://github.com/bingh0/gherkin-node-test/blob/main/docs/failure-ladder.md); this crate adds no copy.
+
 ## Quick start
 
 ```
