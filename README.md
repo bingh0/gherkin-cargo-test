@@ -148,6 +148,261 @@ FAILED: counter :: step definitions are complete and unambiguous
   });
 ```
 
+## Running one scenario by name
+
+`cargo test -- "<filter>"` runs the trials whose name contains the filter.
+The name is the one `--list` prints, kind label included, so `"[skip]"`
+selects the skipped trials. `--skip "<pattern>"` leaves out the trials whose
+name contains the pattern. libtest answers a mistyped filter with
+`ok. 0 passed` and exit 0 — green, having observed nothing. This runner does
+not:
+
+- **A filter or `--skip` under which no scenario ran fails the run**, and the
+  message names the filter, the skip patterns and the feature directory. Exit
+  status is 101. `--ignored` and `--include-ignored` change nothing here:
+  under them a parked scenario really runs, and one that ran counts.
+- **The runner's own check trials don't count.** A filter that matches only
+  `counter :: step definitions are complete and unambiguous` passes that
+  check and is still refused: no scenario was observed.
+- **A filter matching only parked scenarios says so.** If everything it
+  matched is `@skip` or unbound and stays parked, the message reads "matched
+  only ignored scenarios"; nothing ran.
+- **A failed trial outranks the refusal.** The run is already red, and
+  libtest's failure says why.
+- **Not refused: `--list`, and cargo-nextest.** `--list` runs nothing; a
+  selection that lists nothing prints a note and fails nothing. nextest runs
+  every trial in its own process with `--exact`, so there "this process ran
+  no scenario" is the normal case; the exemption needs a nextest variable
+  and `--exact` both.
+- **One filter per run.** A second positional filter is refused before any
+  trial runs, naming every filter in the order given, with exit status 2.
+  After a bare `--` every argument is a filter. libtest would OR them; this
+  harness takes one, so run them one at a time.
+
+The guard is per test target, because one process sees only its own trials.
+`cargo test -- "<filter>"` hands the filter to every test target, so with two
+runner targets the one that does not hold the scenario is refused, and cargo
+stops there. Name the target:
+
+```sh
+cargo test --test design -- "<filter>"
+```
+
+## Running the suite
+
+This section is for a project starting on this runner, and for the build agent
+that works in it. It assumes nothing about the machine: every number that
+depends on hardware is read from the machine, never written into the
+repository. Except where it names a flag or a file of this crate, it describes
+practice, not runner features.
+
+### The loop
+
+- **While working**, run one scenario or one feature: one name filter, with the
+  test target named (`cargo test --test <target> -- "<Feature> :: <Scenario>"`,
+  or a substring of it). The filter rules are in
+  [Running one scenario by name](#running-one-scenario-by-name).
+- **Before handing work back**, run the whole suite, once.
+- **Run long commands in the foreground with a time limit** (for example
+  `timeout`). Do not start a background run and then loop, sleeping and
+  checking: with a limit in the foreground, a run that died is found at once.
+- **If the project has a mutation check**, run during a stage only the mutants
+  for what changed, each against its named target scenario. Before a release,
+  run the whole table once. This crate has no mutation runner; the project's own
+  scripts do it.
+
+### What a faster suite is for
+
+Mutation proves one thing: that a scenario's bindings observe something. Doctor
+the world, and the scenario goes red. It says nothing about three other ways a
+green suite lies:
+
+- an assertion whose ground truth the build itself wrote;
+- a code path the scenarios never drive;
+- input written in a foreign system's name, with no recording of that system.
+
+Spend the time a faster suite saves on those. Assert what the system on the far
+side observes. Replay a recorded foreign input through the installed entry
+point. Count an "every" or "never" claim against the foreign system's own list
+or record. A report that ran only mutation says it checked one thing; say so.
+The [failure ladder](https://github.com/bingh0/gherkin-node-test/blob/main/docs/failure-ladder.md)
+maps these.
+
+### Harness habits that prevent false reds
+
+These apply to projects whose scenarios drive real software: processes,
+sockets, files. All of them are in the project's own harness code.
+
+- **Give every test layer its own `HOME`, temporary folder and tool-state
+  folder, from the first commit.** A unit layer that kept the real home folder
+  once wrote into its owner's real configuration.
+- **Keep anything the run must keep or share outside any folder the harness
+  makes private:** logs, reports, a lock folder, the cargo target folder
+  itself. A harness that gives each run a private `/tmp` makes a build folder
+  under `/tmp` vanish, and the re-run test binary is then not found.
+- **Use one time factor for waits**, set per machine and multiplied into the
+  project's default; 1.0 means no change. A wait for something to happen may
+  scale up or down. A check that something does *not* happen within a window
+  must never scale below the length its author wrote. Better, wait for a later
+  event that can only follow the forbidden one, then assert the forbidden one
+  was not seen.
+- **Write a fixture executable through a child process** (`cp`, for example),
+  when a test process writes an executable and then runs it. If a thread holds
+  the file open for writing while another thread forks, the exec fails with
+  "Text file busy". This is for fixtures only: a product that itself writes and
+  runs a program has the same race, and its own code must stay under test.
+- **Read a cap on a scarce resource from an environment variable, with a
+  default, and print it at the start of the run.** The resource is live
+  sessions or containers, and the cap lives in the harness. A cap set once in a
+  constant and never measured again set one project's suite time for weeks.
+
+### Waiting
+
+`gherkin_cargo_test::harness` is the one way to wait, so a project writes no
+waiting code of its own.
+
+- `wait_for(what, base, predicate)` and `wait_for_some(what, base, probe)`
+  poll until the thing happens, up to `patience(base)`: `base` × the project
+  default (`Features::patience_default(f)`, 1.0 when not set) × the machine's
+  `ABDD_TIME_SCALE`. They return at the first poll that sees it. Polls are up
+  to 100 ms apart, so the return can lag the event by that much, and a
+  condition that is true only between two polls is missed: the predicate
+  should observe something that stays true once it happens (a record, a file,
+  a counter). A predicate is never interrupted, so one that takes longer than
+  the limit makes the wait overrun by that much; the expiry message reports
+  the real elapsed time. A limit too large to be a deadline fails at once with
+  `cause: harness`.
+- A check that something does *not* happen runs its whole window, so the
+  window never shrinks: `absence_window(base)` is `base` × `max(1, ABDD_TIME_SCALE)`,
+  and the project default does not apply. `absent_for(what, base, forbidden)`
+  watches for that window. Prefer `absent_until(what, forbidden, sentinel_what,
+  base, sentinel)`: it waits for a later event that can only follow the
+  forbidden one, then checks. `forbidden` must read something that stays
+  (a record, a file, a counter); a poll can miss a transient.
+- `harness_error(message)` fails a step as the harness's fault: a fixture that
+  would not start, a port it could not bind.
+- Settings come from `ABDD_TIME_SCALE` (a multiplier; 1.0 when unset, and
+  anything but a number from 0.01 to 1000 is an error) and, only when
+  `ABDD_MACHINE_ENV` names one by an absolute path, a settings file. An empty
+  or blank value in the environment counts as unset. The file may be a
+  general env file: only lines that begin with `ABDD_` (after an optional
+  `export `) are read, and no message ever quotes any other line. On those
+  lines a value is quoted (`'…'` or `"…"`, which may hold `#`) or runs to the
+  first `#`; anything else is an error naming the file, line and name. The
+  environment wins over the file. Nothing is read from a home folder. The
+  project default (`patience_default`) must also be from 0.01 to 1000.
+- A step that fails because a wait ran out, or through `harness_error`, gets
+  `  cause: patience` or `  cause: harness` after its role line. The mark is
+  matched to the failure's message text, so a step that catches the panic and
+  panics again with the identical text keeps the cause. Like the
+  role, it is information only: it changes no verdict. Call these functions
+  on the step's own thread; a wait that expires on a helper thread loses the
+  cause.
+- When a project default is set, `ABDD_TIME_SCALE` has a value, or
+  `ABDD_MACHINE_ENV` names a file (even one that sets nothing), `run()` prints
+  one line to stderr first, for example
+  `gherkin-cargo-test: patience x3 (default 3 x machine 1); ABDD_TIME_SCALE unset`.
+  With none of these, a run prints nothing new. A bad setting stops any
+  project's run there, before any trial, with exit status 2, whether or not
+  the project uses `harness`.
+
+### Debug-build hot spots
+
+Tests run debug builds. In the project's `Cargo.toml`,
+
+```toml
+[profile.dev.package."*"]
+opt-level = 3
+```
+
+optimises every dependency and leaves the project's own crates as they are. It
+also covers the regex matching this runner does for every step. Measured on one
+project (539 trials, 1,389 step definitions) on one machine:
+
+| | Default | Dependencies at opt-level 3 |
+|---|---:|---:|
+| Clean build | 11.1 s | 23.3 s |
+| Rebuild after a step-file edit | 0.71 s | 0.71 s |
+| Runner start-up (`--list`) | 0.61 s | 0.12 s |
+
+For one hot crate, `[profile.dev.package.<crate>] opt-level = 3` works too.
+Either way the hot function must not be generic (`&mut dyn Read`, not
+`impl Read`): a generic function is compiled in the crate that calls it, at
+that crate's opt-level, and the setting does nothing (measured once: 2.39 s
+unchanged, against 0.23 s after the fix). Code in the project's own crate is
+not covered; move it into a crate of its own. Set `opt-level` only. Never turn
+off `debug-assertions` or `overflow-checks`: they change what is tested.
+
+### Lint from the first commit
+
+Run `gct-lint --strict` in CI, installed at the same version as the runner the
+project pins, so findings never pile up. The command is described in
+[From the command line](#from-the-command-line-gct-lint).
+
+One rule goes with it. When strict lint flags a vague Then, the fix is a
+stronger binding, or a recorded ruling that narrows the promise. Rewording the
+step down to what the binding already proves narrows the contract quietly.
+
+### How many runs at once
+
+A suite that drives real software is heavy in memory and often mostly waits.
+How many runs fit at once is a property of the machine, not of the repository,
+so do not put a count in the repository. Read it from the machine's
+environment, count every agent's runs together, and when in doubt run one at a
+time. The names shared with gherkin-node-test are `ABDD_HEAVY_JOBS` (heavy runs
+at once, across all agents) and `ABDD_TIME_SCALE` (the time factor for waits,
+above). They are conventions for the project's harness and scripts to read. Every
+`ABDD_` name, what it means and who reads it is listed in one place, the
+[machine settings](https://github.com/bingh0/gherkin-node-test/blob/main/docs/machine-settings.md)
+page in the sibling's repository. Too many at once makes tests fail from load, and those failures look
+exactly like real ones. Measured on one project: the same 24 mutation checks
+at 6 at once instead of 4 produced 14 extra failing scenarios, most of them
+one ordinary assertion. This runner reads `ABDD_TIME_SCALE` (and
+`ABDD_MACHINE_ENV`, see [Waiting](#waiting)); it does not read or enforce
+`ABDD_HEAVY_JOBS`.
+
+### Raising a limit
+
+Raise a limit (threads, a harness cap, runs at once) only after repeated green
+whole runs at the new value, under the load it will really see. Write the
+measurement where the number lives.
+
+### A long run started as a service
+
+Where a service manager starts the run (for example `systemd-run --user` on
+Linux), the run gets the service's limits, not the shell's. On one machine the
+default of 1,024 open files killed a long run in its first minutes. Do one
+short dry run under the same limits first.
+
+### A block for the project's AGENTS.md
+
+A build agent starting a project copies this block into the project's own
+`AGENTS.md` (or `CLAUDE.md`) itself, fills in the target names, and keeps it
+short; this README stays the source for the reasons.
+
+```markdown
+## Running tests
+- One filter per run, and name the target:
+  `cargo test --test <contract-target> -- "<Feature> :: <Scenario>"`
+  (`<design-target>` likewise).
+- A filter or `--skip` that ran no scenario fails the run. A red there means
+  the selection is wrong, not the code.
+- Run the whole suite once before handing work back.
+- Run long commands in the foreground with a time limit, never in the
+  background with a sleep loop.
+- Give each test layer its own HOME and temporary folder.
+- Wait only through `harness::wait_for`, `absent_until` and `absence_window`
+  (`ABDD_TIME_SCALE`, 1.0 when unset). A window that checks something does not
+  happen never shrinks below its written length.
+- Start no more heavy runs at once than the machine's limit (`ABDD_HEAVY_JOBS`),
+  counted across all agents. When it is unset, run one at a time.
+- Run `gct-lint --strict` before committing a `.feature` change.
+- Fix a vague Then with a stronger binding or a recorded ruling. Never reword
+  it down to what the binding already proves.
+- Raise a limit only after repeated green whole runs at the new value.
+- Mutation is one check. A report says which checks it ran.
+```
+
 ## The binding ratchet
 
 That guard failure is half of the design's central mechanism. The other half
@@ -524,6 +779,9 @@ different, and each one is deliberate:
 | `bindRunner(testFn)` + a `gherkin-node-test/vitest` adapter entry | **no analog** | node-only by nature: it rebinds registration onto a foreign JS runner's `test()`. The dialect and lint surface stay in lockstep; runner *hosting* is each sibling's own business |
 | manifest refuses a RE-INVOKED body (vitest retry/repeats re-run the same registered fn) | **no code** — libtest-mimic invokes each trial closure at most once, so the hazard is structurally unreachable | same doctrine, different fence: the cross-process cousin (nextest's one-test-per-process model) is what gets refused here, at build time via nextest's env vars |
 | manifest disabled by a parse error **at load** (validate-everything-first throws before registration) | manifest disabled by the parse failure **trial** (`base :: parses`; recorder disables itself, siblings still run) | same end — a run that failed validation never writes — reached through each sibling's own parse-failure channel |
+| name-filter guard (0.12.0): per test **file** (one `runFeatures` call per file) on node, bun and Deno; a selection under which no scenario ran is red, and the runner's own checks don't count. Under vitest it is not covered (no hook runs when every test is filtered out). The refusal names the filter text on node only (bun and Deno cannot read it). A skip pattern as a selection, the separate "only wip-held" message and the refusal of a second name filter are node-only. bun does not refuse a zero-match file when another file matched. node's `--test-only` with no pattern can run no scenario and stay green: a stated gap | same doctrine, per test **target** (one process): the refusal names the filter, any `--skip` patterns and the feature directory, and says to pick the target; exit status 101. **A second positional filter is refused before any trial, naming each; exit status 2.** `--ignored` and `--include-ignored` are not exempt (parked bodies really run there, and one that ran counts). Exempt: `--list` (a note only), and cargo-nextest when `--exact` is also given (it runs one trial per process) | each sibling can only see its own process or file, and each runtime owns its own filter flag, so the scope and the wording differ. Refusal text is runner-specific and not parity-compared; the shared scenarios are in gnt's `features/honest-run.feature` and proven here in `tests/guards-proof.rs` |
+| role of a failing step (0.12.0): one stderr line just before the failure propagates; what the step threw is rethrown untouched. Printed for any failure inside the step loop, an undefined step and an args-consumption refusal included, because that line is the only place gnt names the failing step. A cleanup-only failure prints `cleanup failed`. The token `role: Given\|When\|Then\|unresolved` and the resolution of And, But and `*` are shared | **a `  role: ...` line inside the failure text**, after the whole panic message and before the `in <file>` line; the first line stays byte-for-byte as 0.11.1 printed it. **None for an undefined step (its text already names the step), the ambiguity refusal, or a cleanup-only failure** | information only on both sides: no tool should count or discard a failure by it. The two differ where each runner already did, or did not, name the step |
+| no analog in 0.12.0 | **the `harness` module**: `patience`, `wait_for`, `wait_for_some`, `absence_window`, `absent_for`, `absent_until`, `harness_error`, `Features::patience_default`, reading `ABDD_TIME_SCALE` and an optional file named by `ABDD_MACHINE_ENV`; a `cause: patience` / `cause: harness` line after the role line and one header line on stderr | harness helpers, not Gherkin: projects on this runner each wrote their own waiting code and got the same things wrong. gnt would ship them as a `./harness` export and use the same two cause words; until then this row stands |
 
 ## The linter role — under someone else's runner
 
@@ -542,7 +800,7 @@ Findings carry `rule` / `severity` / `line` / `message`:
 | `dialect` | error | anything the rejection table above rejects — the exact `GherkinSyntaxError`, as a finding (the parser stops at the first violation, so it arrives alone) |
 | `no-scenarios` | error | a `Feature:` header with no scenarios under it — the file enforces nothing and reads as passing. The same parser refusal as `dialect`, under its own rule name: "add a scenario or delete the file" is a different remedy than "fix this line" |
 | `no-then` | warn | a scenario whose steps never resolve to `Then` — runs code, asserts nothing (`And`/`But`/`*` inherit the preceding primary keyword, across a `Background`) |
-| `vague-then` | warn | a `Then`-resolved step containing *works · correctly · properly · as expected · handles · appropriate* — words that assert nothing checkable |
+| `vague-then` | warn | a `Then`-resolved step containing *works · correctly · properly · as expected · handles · appropriate* — words that assert nothing checkable. The finding also names the trap in the fix: rewording the step down to what its binding proves narrows the contract, so either strengthen the binding or record the narrowing as a ruling. |
 | `single-row-outline` | warn | a `Scenario Outline` with one `Examples` row — a scenario with extra ceremony, and usually a missing case |
 | `near-miss-keyword` | warn | a silently dropped line that was almost certainly meant as syntax: a wrong-case step keyword inside a scenario or `Background` body (`when I add 5`, `GIVEN a counter`), or — anywhere — a construct header that isn't the one exact form the parser recognizes (`scenario: b`, `Scenario : b`, `SCENARIO OUTLINE: b`). Prose trips it too when a Feature description wraps a sentence so that a line begins with a construct word and a colon (`…would pass every contract` / `scenario: the wrong session moved, …`); rewrap the line. |
 | `dropped-prose` | warn | any *other* line inside a scenario, outline, or `Background` body that the parser dropped as narrative — and any non-tag, non-comment line *above* the `Feature:` header. The floor under `near-miss-keyword`: no dropped line goes unaccounted. The `Feature` narrative (below the header) stays exempt |
@@ -708,6 +966,8 @@ loud by construction.
 |---|---|
 | `Features::new(dir).feature(base, definer).wip(base).run()` | **high-level runner**: discover every `.feature`, scoped registries, typed worlds, guard trials; `.manifest(path)` opts into the [run manifest](#the-run-manifest) |
 | `Features::build_trials()` | the same trials without running them (the guards are testable — see `tests/guards-proof.rs`) |
+| `Features::run_with(&Arguments)` | run under constructed `libtest_mimic::Arguments` and return a `RunReport` instead of exiting; applies the [name-filter guard](#running-one-scenario-by-name) (what `run()` does after parsing `argv`) |
+| `RunReport` | `{ conclusion, refusal, note }`: libtest-mimic's counts, the filter guard's refusal (`Some` means fail the run whatever the counts), and a non-failing note (a `--list` filter that lists nothing) |
 | `parse_feature(text, filename)` | parse → `ParsedFeature` (incl. `outlines: Vec<OutlineMeta>`); `Err(GherkinSyntaxError)` on unsupported/malformed syntax |
 | `lint_feature(text, filename)` | **linter**: dialect gate + spec lints as `Vec<LintFinding>` — pure text-in/findings-out, for use under another runner |
 | `gct-lint [--strict] [PATH]...` | **command**: the linter over files and directories, one `path:line: severity[rule]: message` line per finding; exits 1 on any error finding (see [From the command line](#from-the-command-line-gct-lint)) |
@@ -718,6 +978,11 @@ loud by construction.
 | `DataTable` | cucumber-compatible step table: `raw` / `rows` / `hashes` / `rows_hash` / `transpose` |
 | `build_snippet(text)` | paste-ready step definition for an unbound step (body panics). One known edge: step text containing `"#` would break the emitted `r#"…"#` literal — write that regex by hand |
 | `GherkinSyntaxError` | parse error; carries `.line`, displays as `file:line: message` |
+| `Features::patience_default(f)` | the project's default patience factor (0.01 to 1000; set once per process) |
+| `harness::patience(base)` / `harness::absence_window(base)` | the limits: `base × default × ABDD_TIME_SCALE`, and `base × max(1, ABDD_TIME_SCALE)` (see [Waiting](#waiting)) |
+| `harness::wait_for(what, base, predicate)` / `harness::wait_for_some(what, base, probe) -> T` | poll (up to 100 ms apart) until a poll sees it; on expiry fail with `cause: patience` |
+| `harness::absent_for(what, base, forbidden)` / `harness::absent_until(what, forbidden, sentinel_what, base, sentinel)` | absence checks: a whole window, or until a later event |
+| `harness::harness_error(message) -> !` | fail a step as the harness's fault, with `cause: harness` |
 
 There is also a corpus checker for evaluating an existing feature suite
 against this grammar before porting a project:
@@ -725,6 +990,19 @@ against this grammar before porting a project:
 ```sh
 cargo run --example parse -- path/to/features/*.feature
 ```
+
+A failing step's failure (from `execute_steps`, and so from every scenario
+trial) starts with ``step `<Keyword> <text>` (feature line <N>) failed: <panic message>``
+and then names the step's role on a line of its own, `  role: Given`,
+`  role: When` or `  role: Then`. `And`, `But` and `*` take the role of the
+nearest earlier Given/When/Then in the executed list (Background steps first);
+with none, the line reads `  role: unresolved`. A step that failed through a
+`harness` wait running out, or through `harness_error`, then gets
+`  cause: patience` or `  cause: harness`; the mark is matched by message text, so another failure gets none unless it repeats a caught marked panic's exact text.
+A cleanup failure has no step and no role line. The role is information for whoever reads a red. No tool
+should count or discard a failure by it: a real catch can fail in a When (the
+step asserts on the action's result), and a load-caused failure can look like
+an ordinary Then assertion.
 
 ## Provenance
 

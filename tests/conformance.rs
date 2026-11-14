@@ -900,3 +900,260 @@ fn outline_meta_records_header_line_and_referenced_placeholders() {
     // First-appearance order: title, then step text/tables in step order.
     assert_eq!(o.placeholders, vec!["title", "cell", "x"]);
 }
+
+// --- A failing step's failure names the step and its role -------------------
+
+/// Run `src` with every step bound to a panic of `msg`, except that steps
+/// whose text starts with "ok " pass; returns the failure.
+fn role_failure(src: &str, msg: &str) -> String {
+    let mut reg: StepRegistry<()> = StepRegistry::new();
+    reg.define(r"^ok .*$", |_, _, _| {});
+    let msg = msg.to_string();
+    reg.define(r"^bad .*$", move |_, _, _| panic!("{}", msg));
+    let steps = steps_of(src);
+    execute_steps(&steps, &reg, ()).expect_err("must fail")
+}
+
+fn role_of(src: &str) -> String {
+    let e = role_failure(src, "boom");
+    let last = e.lines().last().expect("a last line").to_string();
+    last
+}
+
+#[test]
+fn a_failing_and_after_then_names_its_text_line_and_the_then_role() {
+    let src = "Feature: f\nScenario: s\n  Given ok a\n  When ok b\n  Then ok c\n  And bad d\n";
+    let e = role_failure(src, "boom");
+    assert_eq!(
+        e,
+        format!(
+            "step `{} {}` (feature line {}) failed: {}\n  role: Then",
+            "And", "bad d", 6, "boom"
+        )
+    );
+    assert!(!e.contains("role: And"), "got: {e}");
+}
+
+#[test]
+fn and_and_but_resolve_to_the_nearest_earlier_primary_keyword() {
+    let f = |kw: &str, step: &str| {
+        role_of(&format!(
+            "Feature: f\nScenario: s\n  {kw} ok a\n  {step} bad b\n"
+        ))
+    };
+    assert_eq!(f("Given", "And"), "  role: Given");
+    assert_eq!(f("When", "And"), "  role: When");
+    assert_eq!(f("Then", "But"), "  role: Then");
+    assert_eq!(f("When", "*"), "  role: When");
+    assert_eq!(f("Then", "Then"), "  role: Then");
+    assert_eq!(f("Given", "When"), "  role: When");
+    // The nearest earlier primary wins over an older one, through And/But.
+    let src = "Feature: f\nScenario: s\n  Given ok a\n  Then ok b\n  And ok c\n  But ok d\n  When ok e\n  * bad f\n";
+    assert_eq!(role_of(src), "  role: When");
+}
+
+#[test]
+fn an_and_in_a_background_resolves_within_the_background() {
+    let src = "Feature: f\nBackground:\n  When ok a\n  And bad b\nScenario: s\n  Then ok c\n";
+    let e = role_failure(src, "boom");
+    assert!(
+        e.starts_with("step `And bad b` (feature line 4) failed: boom"),
+        "got: {e}"
+    );
+    assert!(e.ends_with("\n  role: When"), "got: {e}");
+}
+
+#[test]
+fn a_scenario_step_resolves_across_the_background_boundary() {
+    let src = "Feature: f\nBackground:\n  Given ok a\nScenario: s\n  And bad b\n";
+    assert_eq!(role_of(src), "  role: Given");
+}
+
+#[test]
+fn a_step_with_no_earlier_primary_keyword_is_unresolved() {
+    // The parser accepts a leading And/But/*, so this is reachable.
+    for kw in ["And", "But", "*"] {
+        let src = format!("Feature: f\nScenario: s\n  {kw} bad a\n  Then ok b\n");
+        assert_eq!(role_of(&src), "  role: unresolved", "{kw}");
+    }
+}
+
+#[test]
+fn a_multi_line_panic_keeps_the_first_line_and_puts_the_role_last() {
+    let msg = "line one\nline two\n  line three";
+    let e = role_failure("Feature: f\nScenario: s\n  Then bad x\n", msg);
+    assert_eq!(
+        e,
+        format!("step `Then bad x` (feature line 3) failed: {msg}\n  role: Then")
+    );
+}
+
+#[test]
+fn cleanup_failure_has_no_role_and_a_step_failure_keeps_its_role_over_it() {
+    // Cleanup failing alone: no step failed, no role line.
+    let mut reg: StepRegistry<()> = StepRegistry::new();
+    reg.define_exact("cleanup is registered", |ctx, _, _| {
+        ctx.defer(|_| panic!("cleanup boom"));
+    });
+    let steps = steps_of("Feature: f\nScenario: s\n  Given cleanup is registered\n");
+    let e = execute_steps(&steps, &reg, ()).expect_err("must fail");
+    assert_eq!(e, "cleanup failed: cleanup boom");
+
+    // A step failure followed by a failing cleanup: the step's failure and role.
+    reg.define_exact("it breaks", |_, _, _| panic!("step boom"));
+    let steps =
+        steps_of("Feature: f\nScenario: s\n  Given cleanup is registered\n  When it breaks\n");
+    let e = execute_steps(&steps, &reg, ()).expect_err("must fail");
+    assert_eq!(
+        e,
+        "step `When it breaks` (feature line 4) failed: step boom\n  role: When"
+    );
+}
+
+#[test]
+fn undefined_and_ambiguous_failures_carry_no_role_line() {
+    let reg: StepRegistry<()> = StepRegistry::new();
+    let steps = steps_of("Feature: f\nScenario: s\n  Given nothing binds\n");
+    let e = execute_steps(&steps, &reg, ()).expect_err("must fail");
+    assert!(!e.contains("role:"), "got: {e}");
+    let mut reg: StepRegistry<()> = StepRegistry::new();
+    reg.define(r"^dup$", |_, _, _| {});
+    reg.define(r"dup", |_, _, _| {});
+    let steps = steps_of("Feature: f\nScenario: s\n  Given dup\n");
+    let e = execute_steps(&steps, &reg, ()).expect_err("must fail");
+    assert!(!e.contains("role:"), "got: {e}");
+}
+
+// --- A failing step's cause, from the harness waits ---------------------------
+
+mod cause_line {
+    use super::steps_of;
+    use gherkin_cargo_test::harness::{absent_for, harness_error, wait_for};
+    use gherkin_cargo_test::{execute_steps, StepRegistry};
+    use std::time::Duration;
+
+    fn registry() -> StepRegistry<()> {
+        let mut reg: StepRegistry<()> = StepRegistry::new();
+        reg.define_exact("ok", |_, _, _| {});
+        reg.define_exact("the light turns green", |_, _, _| {
+            wait_for("the light", Duration::from_millis(20), || false);
+        });
+        reg.define_exact("the fixture starts", |_, _, _| {
+            harness_error("the fixture would not start: port 8080 is taken");
+        });
+        reg.define_exact("two equals three", |_, _, _| {
+            assert_eq!(2, 3, "plain");
+        });
+        reg.define_exact("no alarm sounds", |_, _, _| {
+            absent_for("the alarm", Duration::from_millis(20), || true);
+        });
+        reg.define_exact("a caught wait then an assert", |_, _, _| {
+            let r = std::panic::catch_unwind(|| {
+                wait_for("the light", Duration::from_millis(10), || false)
+            });
+            assert!(r.is_err());
+            panic!("something else went wrong");
+        });
+        reg
+    }
+
+    fn fail(steps: &str) -> String {
+        let src = format!("Feature: f\nScenario: s\n  Given ok\n{steps}");
+        execute_steps(&steps_of(&src), &registry(), ()).expect_err("must fail")
+    }
+
+    #[test]
+    fn an_expired_wait_gets_cause_patience_after_its_role_line() {
+        let e = fail("  When the light turns green\n");
+        let first = "step `When the light turns green` (feature line 4) failed: wait_for: gave up waiting for the light after ";
+        assert!(e.starts_with(first), "got: {e}");
+        assert!(e.ends_with("\n  role: When\n  cause: patience"), "got: {e}");
+        assert_eq!(e.matches("cause:").count(), 1, "got: {e}");
+    }
+
+    #[test]
+    fn harness_error_gets_cause_harness() {
+        let e = fail("  Given the fixture starts\n");
+        assert_eq!(
+            e,
+            "step `Given the fixture starts` (feature line 4) failed: the fixture would not start: port 8080 is taken\n  role: Given\n  cause: harness"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_assert_and_an_absence_failure_get_no_cause_line() {
+        let e = fail("  Then two equals three\n");
+        assert!(e.ends_with("\n  role: Then"), "got: {e}");
+        assert!(!e.contains("cause:"), "got: {e}");
+        let e = fail("  Then no alarm sounds\n");
+        assert!(e.contains("absent_for: the alarm was seen"), "got: {e}");
+        assert!(e.ends_with("\n  role: Then"), "got: {e}");
+    }
+
+    #[test]
+    fn a_caught_patience_panic_then_another_failure_gets_no_cause_line() {
+        let e = fail("  When a caught wait then an assert\n");
+        assert_eq!(
+            e,
+            "step `When a caught wait then an assert` (feature line 4) failed: something else went wrong\n  role: When"
+        );
+    }
+
+    #[test]
+    fn a_caught_marked_panic_raised_again_with_identical_text_keeps_its_cause() {
+        // The mark is matched to the message text, as the docs say.
+        let mut reg: StepRegistry<()> = StepRegistry::new();
+        reg.define_exact("a caught harness error raised again", |_, _, _| {
+            let e = std::panic::catch_unwind(|| harness_error("same words")).unwrap_err();
+            let text = e
+                .downcast_ref::<String>()
+                .expect("a String payload")
+                .clone();
+            panic!("{}", text);
+        });
+        let src = "Feature: f\nScenario: s\n  Given a caught harness error raised again\n";
+        let e = execute_steps(&steps_of(src), &reg, ()).expect_err("must fail");
+        assert_eq!(
+            e,
+            "step `Given a caught harness error raised again` (feature line 3) failed: same words\n  role: Given\n  cause: harness"
+        );
+    }
+
+    #[test]
+    fn a_later_ordinary_failure_on_the_same_thread_gets_no_cause_line() {
+        let e = fail("  When the light turns green\n");
+        assert!(e.ends_with("cause: patience"), "got: {e}");
+        // Same thread, the next scenario: an ordinary failure.
+        let e = fail("  Then two equals three\n");
+        assert!(!e.contains("cause:"), "got: {e}");
+        // A passing step after a caught marked panic, then an ordinary one.
+        let mut reg = registry();
+        reg.define_exact("a caught wait", |_, _, _| {
+            let _ = std::panic::catch_unwind(|| {
+                wait_for("the light", Duration::from_millis(5), || false)
+            });
+        });
+        let src = "Feature: f\nScenario: s\n  Given a caught wait\n  Then two equals three\n";
+        let e = execute_steps(&steps_of(src), &reg, ()).expect_err("must fail");
+        assert!(!e.contains("cause:"), "got: {e}");
+    }
+
+    #[test]
+    fn a_stale_mark_never_labels_a_later_step_even_with_the_same_text() {
+        // Step one catches a marked panic and passes; step two panics
+        // ordinarily with the very same text. Only the clear before each
+        // step keeps the stale mark off it.
+        let mut reg: StepRegistry<()> = StepRegistry::new();
+        reg.define_exact("a caught harness error", |_, _, _| {
+            let _ = std::panic::catch_unwind(|| harness_error("same words"));
+        });
+        reg.define_exact("an ordinary panic", |_, _, _| panic!("{}", "same words"));
+        let src =
+            "Feature: f\nScenario: s\n  Given a caught harness error\n  Then an ordinary panic\n";
+        let e = execute_steps(&steps_of(src), &reg, ()).expect_err("must fail");
+        assert_eq!(
+            e,
+            "step `Then an ordinary panic` (feature line 4) failed: same words\n  role: Then"
+        );
+    }
+}

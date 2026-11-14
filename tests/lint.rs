@@ -149,6 +149,20 @@ fn each_banned_word_fires_at_the_step_line() {
 }
 
 #[test]
+fn vague_then_message_is_pinned_whole_and_strict_never_rewords_it() {
+    // The text is byte-identical to the node sibling's; strict changes severity only.
+    let want = "vague Then \"it works\" — \"works\" is not a checkable outcome; name the observable result. If the binding proves less than the step promised, strengthen the binding or record the narrowing as a ruling; rewording the step down to what the binding proves is a contract change";
+    let text = feat("Scenario: s\n  When I poke it\n  Then it works\n");
+    let default = lint_feature(&text, "<feature>");
+    let strict = lint_feature_strict(&text, "<feature>");
+    assert_eq!(default.len(), 1, "{default:?}");
+    assert_eq!(strict.len(), 1, "{strict:?}");
+    assert_eq!(default[0].message, want);
+    assert_eq!(strict[0].message, want);
+    assert_eq!(default[0].message, strict[0].message);
+}
+
+#[test]
 fn only_then_resolved_steps_are_checked() {
     // "works" in a Given/When describes state, not an unchecked assertion.
     let findings = lint_feature(

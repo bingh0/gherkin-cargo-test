@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
+      - run: cargo test --all-targets --no-fail-fast
       # The crate's own features + the accepted fixtures must keep parsing.
       - run: cargo run --example parse -- features/*.feature tests/fixtures/good/*.feature
         shell: bash
@@ -39,4 +39,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"
-      - run: cargo test --all-targets
+      - run: cargo test --all-targets --no-fail-fast
