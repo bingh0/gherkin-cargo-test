@@ -776,6 +776,15 @@ mod tests {
 
     // --- Resolution ----------------------------------------------------------
 
+    /// Fake settings paths that are absolute on the platform running the test
+    /// (`/m.env` is rooted but not absolute on Windows).
+    const M: &str = if cfg!(windows) { "C:\\m.env" } else { "/m.env" };
+    const MISSING: &str = if cfg!(windows) {
+        "C:\\missing.env"
+    } else {
+        "/missing.env"
+    };
+
     fn resolve_in(env: &[(&str, &str)], files: &[(&str, &str)]) -> Result<Settings, String> {
         let env: HashMap<String, OsString> = env
             .iter()
@@ -822,11 +831,11 @@ mod tests {
             let r = resolve_in(&[("ABDD_TIME_SCALE", v)], &[]);
             assert_eq!(r.is_ok(), ok, "{v}: {r:?}");
             let text = format!("ABDD_TIME_SCALE={v}\n");
-            let r = resolve_in(&[("ABDD_MACHINE_ENV", "/m.env")], &[("/m.env", &text)]);
+            let r = resolve_in(&[("ABDD_MACHINE_ENV", M)], &[(M, &text)]);
             assert_eq!(r.is_ok(), ok, "file {v}: {r:?}");
             if let Err(e) = r {
                 assert!(
-                    e.starts_with(&format!("ABDD_TIME_SCALE (/m.env line 1) is \"{v}\"")),
+                    e.starts_with(&format!("ABDD_TIME_SCALE ({M} line 1) is \"{v}\"")),
                     "{e}"
                 );
                 assert!(e.contains("a number from 0.01 to 1000"), "{e}");
@@ -837,29 +846,26 @@ mod tests {
     #[test]
     fn file_supplies_the_scale_with_its_path_and_line() {
         let s = resolve_in(
-            &[("ABDD_MACHINE_ENV", "/m.env")],
-            &[(
-                "/m.env",
-                "# comment\nABDD_HEAVY_JOBS=4\nABDD_TIME_SCALE=3\n",
-            )],
+            &[("ABDD_MACHINE_ENV", M)],
+            &[(M, "# comment\nABDD_HEAVY_JOBS=4\nABDD_TIME_SCALE=3\n")],
         )
         .unwrap();
         assert_eq!(s.scale, 3.0);
         assert_eq!(
             s.scale_source,
             Source::File {
-                path: "/m.env".into(),
+                path: M.into(),
                 line: 3
             }
         );
-        assert_eq!(s.machine_env.as_deref(), Some("/m.env"));
+        assert_eq!(s.machine_env.as_deref(), Some(M));
     }
 
     #[test]
     fn environment_wins_over_the_file() {
         let s = resolve_in(
-            &[("ABDD_MACHINE_ENV", "/m.env"), ("ABDD_TIME_SCALE", "2")],
-            &[("/m.env", "ABDD_TIME_SCALE=3\n")],
+            &[("ABDD_MACHINE_ENV", M), ("ABDD_TIME_SCALE", "2")],
+            &[(M, "ABDD_TIME_SCALE=3\n")],
         )
         .unwrap();
         assert_eq!((s.scale, s.scale_source), (2.0, Source::Environment));
@@ -870,8 +876,8 @@ mod tests {
         // The scale falls through to the file.
         for blank in ["", " ", "\t \t"] {
             let s = resolve_in(
-                &[("ABDD_MACHINE_ENV", "/m.env"), ("ABDD_TIME_SCALE", blank)],
-                &[("/m.env", "ABDD_TIME_SCALE=3\n")],
+                &[("ABDD_MACHINE_ENV", M), ("ABDD_TIME_SCALE", blank)],
+                &[(M, "ABDD_TIME_SCALE=3\n")],
             )
             .unwrap();
             assert_eq!(
@@ -879,7 +885,7 @@ mod tests {
                 (
                     3.0,
                     Source::File {
-                        path: "/m.env".into(),
+                        path: M.into(),
                         line: 1
                     }
                 ),
@@ -900,22 +906,21 @@ mod tests {
 
     #[test]
     fn a_bad_scale_in_the_file_names_file_and_line() {
-        let e = resolve_in(
-            &[("ABDD_MACHINE_ENV", "/m.env")],
-            &[("/m.env", "\nABDD_TIME_SCALE=-1\n")],
-        )
-        .unwrap_err();
+        let e =
+            resolve_in(&[("ABDD_MACHINE_ENV", M)], &[(M, "\nABDD_TIME_SCALE=-1\n")]).unwrap_err();
         assert!(
-            e.contains("ABDD_TIME_SCALE (/m.env line 2) is \"-1\""),
+            e.contains(&format!("ABDD_TIME_SCALE ({M} line 2) is \"-1\"")),
             "{e}"
         );
     }
 
     #[test]
     fn an_unreadable_named_file_is_loud() {
-        let e = resolve_in(&[("ABDD_MACHINE_ENV", "/missing.env")], &[]).unwrap_err();
+        let e = resolve_in(&[("ABDD_MACHINE_ENV", MISSING)], &[]).unwrap_err();
         assert!(
-            e.contains("ABDD_MACHINE_ENV names /missing.env, which cannot be read"),
+            e.contains(&format!(
+                "ABDD_MACHINE_ENV names {MISSING}, which cannot be read"
+            )),
             "{e}"
         );
     }
@@ -933,6 +938,19 @@ mod tests {
                 "{e}"
             );
             assert!(e.contains("absolute path"), "{e}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rooted_path_without_a_drive_is_refused_on_windows() {
+        for rel in ["\\m.env", "/m.env", "C:m.env"] {
+            let e = resolve(
+                &|n| (n == "ABDD_MACHINE_ENV").then(|| OsString::from(rel)),
+                &|_| panic!("a driveless path must not be read"),
+            )
+            .unwrap_err();
+            assert!(e.contains("a relative path"), "{rel}: {e}");
         }
     }
 
@@ -961,11 +979,11 @@ mod tests {
     #[test]
     fn a_malformed_abdd_line_is_loud_even_when_the_environment_sets_the_scale() {
         let e = resolve_in(
-            &[("ABDD_MACHINE_ENV", "/m.env"), ("ABDD_TIME_SCALE", "2")],
-            &[("/m.env", "ABDD_TIME_SCALE=3\nABDD_JUNK\n")],
+            &[("ABDD_MACHINE_ENV", M), ("ABDD_TIME_SCALE", "2")],
+            &[(M, "ABDD_TIME_SCALE=3\nABDD_JUNK\n")],
         )
         .unwrap_err();
-        assert!(e.starts_with("/m.env line 2: ABDD_JUNK:"), "{e}");
+        assert!(e.starts_with(&format!("{M} line 2: ABDD_JUNK:")), "{e}");
     }
 
     // --- File format ---------------------------------------------------------
@@ -1020,8 +1038,8 @@ mod tests {
         assert_eq!(one("ABDD_X=a#b"), ("ABDD_X".into(), "a".into()));
         // A quoted scale with blanks inside is trimmed before parsing.
         let s = resolve_in(
-            &[("ABDD_MACHINE_ENV", "/m.env")],
-            &[("/m.env", "ABDD_TIME_SCALE=\" 2 \" # quoted\n")],
+            &[("ABDD_MACHINE_ENV", M)],
+            &[(M, "ABDD_TIME_SCALE=\" 2 \" # quoted\n")],
         )
         .unwrap();
         assert_eq!(s.scale, 2.0);
@@ -1056,11 +1074,11 @@ mod tests {
         assert_eq!(v.len(), 1, "{v:?}");
         assert_eq!(v[0].name, "ABDD_TIME_SCALE");
         let s = resolve_in(
-            &[("ABDD_MACHINE_ENV", "/m.env")],
-            &[("/m.env", "ABDD_MACHINE_ENV=/other.env\nABDD_TIME_SCALE=2\n")],
+            &[("ABDD_MACHINE_ENV", M)],
+            &[(M, "ABDD_MACHINE_ENV=/other.env\nABDD_TIME_SCALE=2\n")],
         )
         .unwrap();
-        assert_eq!(s.machine_env.as_deref(), Some("/m.env"));
+        assert_eq!(s.machine_env.as_deref(), Some(M));
         assert_eq!(s.scale, 2.0);
     }
 
@@ -1134,14 +1152,12 @@ mod tests {
                         text.push_str(other);
                         text.push('\n');
                     }
-                    let e = resolve_in(&[("ABDD_MACHINE_ENV", "/m.env")], &[("/m.env", &text)])
-                        .unwrap_err();
+                    let e = resolve_in(&[("ABDD_MACHINE_ENV", M)], &[(M, &text)]).unwrap_err();
                     assert!(!e.contains(SECRET), "{text:?} leaked: {e}");
                 }
                 // And a good file around the same line: no error, nothing quoted.
                 let text = format!("{other}\nABDD_TIME_SCALE=2\n{other}\n");
-                let s =
-                    resolve_in(&[("ABDD_MACHINE_ENV", "/m.env")], &[("/m.env", &text)]).unwrap();
+                let s = resolve_in(&[("ABDD_MACHINE_ENV", M)], &[(M, &text)]).unwrap();
                 let header = header_line(1.0, &s);
                 assert!(!header.contains(SECRET), "{header}");
             }
@@ -1484,11 +1500,11 @@ mod tests {
 
     #[test]
     fn absent_until_waits_for_patience_not_the_absence_window() {
-        // With a project default of 0.1 and scale 0.5, patience(200ms) is
-        // 10ms while absence_window(200ms) is 200ms: the expiry must come
-        // well before 200ms and name the patience limit.
+        // With a project default of 0.01 and scale 0.5, patience(2s) is
+        // 10ms while absence_window(2s) is 2s: the expiry must come
+        // well before 2s and name the patience limit.
         let f = Factors {
-            default: 0.1,
+            default: 0.01,
             scale: 0.5,
             source: "ABDD_TIME_SCALE=0.5 (environment)".into(),
         };
@@ -1498,7 +1514,7 @@ mod tests {
                 "a duplicate",
                 || false,
                 "the receipt",
-                ms(200),
+                ms(2000),
                 &f,
                 || false,
             )
@@ -1507,13 +1523,13 @@ mod tests {
         let took = start.elapsed();
         assert!(took >= ms(10), "gave up early: {took:?}");
         assert!(
-            took < ms(150),
+            took < ms(1500),
             "waited the absence window, not patience: {took:?}"
         );
         assert_eq!(cause, Some(Cause::Patience));
         assert!(
             msg.ends_with(
-                "limit 10ms = base 200ms x project default 0.1 x machine scale 0.5 \
+                "limit 10ms = base 2s x project default 0.01 x machine scale 0.5 \
                  (ABDD_TIME_SCALE=0.5 (environment))"
             ),
             "{msg}"

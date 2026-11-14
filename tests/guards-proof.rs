@@ -242,6 +242,13 @@ fn expect_no_refusal(failures: &mut Vec<String>, case: &str, r: &RunReport) {
     );
 }
 
+/// A feature file's path as the runner shows it: the directory exactly as
+/// given to `Features::new`, then the platform separator, then the file name
+/// (`Path::join`, so `\` on Windows).
+fn feature_path(dir: &str, file: &str) -> String {
+    std::path::Path::new(dir).join(file).display().to_string()
+}
+
 const GOOD_DIR: &str = "tests/fixtures/good";
 const CHECK_TRIAL: &str = "counter :: step definitions are complete and unambiguous";
 
@@ -812,7 +819,10 @@ fn role_line_cases(failures: &mut Vec<String>, token: &std::path::Path) {
     );
     let Some(role_at) = role_at else { return };
     pos += role_at;
-    let in_at = block[pos..].find("\n  in tests/fixtures/rolediff/rolediff.feature");
+    let in_at = block[pos..].find(&format!(
+        "\n  in {}",
+        feature_path("tests/fixtures/rolediff", "rolediff.feature")
+    ));
     expect_shown(
         failures,
         case,
@@ -1181,8 +1191,9 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let out = run_child_env(token, "patience", &[], &env);
         let shown = format!("stdout {:?}, stderr {:?}", out.stdout, out.stderr);
         let says = format!(
-            "limit {limit} = base 50ms x project default 1 x machine scale {} ({source})\n  role: When\n  cause: patience\n  in tests/fixtures/patience/patience.feature",
-            scale.unwrap_or("1")
+            "limit {limit} = base 50ms x project default 1 x machine scale {} ({source})\n  role: When\n  cause: patience\n  in {}",
+            scale.unwrap_or("1"),
+            feature_path("tests/fixtures/patience", "patience.feature")
         );
         expect_shown(
             failures,
