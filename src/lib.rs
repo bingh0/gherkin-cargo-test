@@ -25,7 +25,7 @@
 //!   Feature:            one per file, required
 //!   Background:         optional, at most one, before any Scenario
 //!   Scenario:           free text title
-//!   Scenario Outline:   + exactly one Examples: table; <placeholder> substitution
+//!   Scenario Outline:   + exactly one Examples: table; `<placeholder>` substitution
 //!   Examples:           a leading header row then >=1 data row, pipe-delimited
 //!   Steps:              Given | When | Then | And | But | *   followed by text
 //!   Step data tables:   | rows after a step attach to it; the step closure
@@ -68,6 +68,15 @@
 //! If you need the real thing, reach for the `gherkin` crate or cucumber-rs.
 //! See README.md for the full grammar and rationale.
 //!
+//! HONEST RUNS. A name filter or `--skip` under which no scenario ran fails
+//! the run, exit status 101 (`Features::run_with` returns the verdict as a
+//! `RunReport`); the runner's own check trials do not count as a scenario
+//! run. A failing step's failure names its role (Given, When or Then, with
+//! And, But and `*` resolved) on a `role:` line and, when the failure came
+//! from the `harness` module, its `cause:`; both are information only and
+//! change no verdict. The `harness` module is one way to wait, with a machine
+//! time factor read from `ABDD_TIME_SCALE`. See README.md for the detail.
+//!
 //! Two boring dependencies — `regex` (step matching) and `libtest-mimic`
 //! (per-scenario Trials under `cargo test`). Zero-dependency is a non-goal here:
 //! hand-rolling a regex engine or a test protocol would be its own foot-gun.
@@ -78,10 +87,13 @@ use std::fmt;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use libtest_mimic::{Arguments, Failed, Trial};
+use libtest_mimic::{Arguments, Conclusion, Failed, Trial};
 use regex::Regex;
+
+pub mod harness;
 
 // --- Error --------------------------------------------------------------------
 
@@ -1077,7 +1089,7 @@ fn step_keyword_exact(lower: &str) -> Option<&'static str> {
 ///    scenario — the @only rejection prescribes name-filter focus, and a
 ///    duplicated title breaks it silently: the filter matches both copies,
 ///    and two outlines sharing a title expand to byte-identical trial names
-///    (the [n] suffix indexes rows within one outline, not across outlines).
+///    (the `[n]` suffix indexes rows within one outline, not across outlines).
 ///    Compared pre-expansion, with a post-expansion backstop. The runner
 ///    refuses the file too (a failing trial, the @only mechanism), which is
 ///    why this one is an error.
@@ -1162,7 +1174,7 @@ fn lint_feature_impl(text: &str, filename: &str, strict: bool) -> Vec<LintFindin
                 LintRule::VagueThen,
                 st.line,
                 format!(
-                    "vague Then \"{}\" — \"{}\" is not a checkable outcome; name the observable result",
+                    "vague Then \"{}\" — \"{}\" is not a checkable outcome; name the observable result. If the binding proves less than the step promised, strengthen the binding or record the narrowing as a ruling; rewording the step down to what the binding proves is a contract change",
                     st.text,
                     m.as_str()
                 ),
@@ -1514,7 +1526,7 @@ impl<W> StepRegistry<W> {
 // --- Snippets ----------------------------------------------------------------
 
 /// Build a paste-ready step definition for an unbound step: numbers become
-/// (\d+) / ([\d.]+) captures, "quoted strings" become "([^"]*)", everything
+/// (\d+) / ([\d.]+) captures, "quoted strings" become `"([^"]*)"`, everything
 /// else is regex-escaped. The generated body PANICS — an empty body would turn
 /// the pasted definition into an instant vacuous pass, the exact failure mode
 /// this harness exists to prevent.
@@ -1554,7 +1566,15 @@ fn panic_msg(e: Box<dyn Any + Send>) -> String {
 
 /// Run a flat list of steps against a fresh `world`. Fails on an undefined
 /// step or a panicking assertion (the failure message carries the step text
-/// and its .feature line). Deferred cleanup (`ctx.defer`) runs LIFO even when
+/// and its .feature line, then a `  role: Given|When|Then|unresolved` line after
+/// the whole panic message: information only, And/But/* resolved to the nearest
+/// earlier primary step in the list). When the step's panic came from
+/// `harness::wait_for` / `wait_for_some` / `absent_until` running out of
+/// patience, or from `harness::harness_error`, on the step's own thread, a
+/// `  cause: patience` or `  cause: harness` line follows the role line. The
+/// mark is matched to the failure's message text, so any other failure gets
+/// none unless the step caught a marked panic and then panicked with the
+/// identical text, which keeps the cause. Deferred cleanup (`ctx.defer`) runs LIFO even when
 /// a step failed; the step failure outranks cleanup errors. Exposed so tests
 /// and other harnesses can drive it without going through `cargo test`.
 /// The ambiguity refusal for a list of steps, or None: the first step
@@ -1592,7 +1612,11 @@ pub fn execute_steps<W>(steps: &[Step], reg: &StepRegistry<W>, world: W) -> Resu
     }
     let mut ctx = Ctx::new(world);
     let mut failure: Option<String> = None;
+    let mut role: Option<&str> = None;
     for step in steps {
+        if is_primary(&step.keyword) {
+            role = Some(step.keyword.as_str());
+        }
         match reg.find(&step.text) {
             None => {
                 failure = Some(format!(
@@ -1605,21 +1629,30 @@ pub fn execute_steps<W>(steps: &[Step], reg: &StepRegistry<W>, world: W) -> Resu
             Some((idx, args)) => {
                 let table = step.table.as_ref().map(|t| DataTable::new(t.clone()));
                 let f = &reg.defs[idx].1;
+                // A stale mark from an earlier step or scenario on this
+                // thread must never label this step's failure.
+                harness::clear_cause();
                 if let Err(e) =
                     catch_unwind(AssertUnwindSafe(|| f(&mut ctx, &args, table.as_ref())))
                 {
+                    let cause = harness::take_cause(&*e)
+                        .map(|c| format!("\n  cause: {}", c.as_str()))
+                        .unwrap_or_default();
                     failure = Some(format!(
-                        "step `{} {}` (feature line {}) failed: {}",
+                        "step `{} {}` (feature line {}) failed: {}\n  role: {}{}",
                         step.keyword,
                         step.text,
                         step.line,
-                        panic_msg(e)
+                        panic_msg(e),
+                        role.unwrap_or("unresolved"),
+                        cause
                     ));
                     break;
                 }
             }
         }
     }
+    harness::clear_cause();
     let mut deferred = std::mem::take(&mut ctx.deferred);
     while let Some(f) = deferred.pop() {
         if let Err(e) = catch_unwind(AssertUnwindSafe(|| f(&mut ctx.world))) {
@@ -2022,6 +2055,7 @@ fn feature_trials<W: Default + 'static>(
     base: &str,
     wip: Wip,
     recorder: Option<Arc<ManifestRecorder>>,
+    ran: Arc<AtomicUsize>,
 ) -> Vec<Trial> {
     let file = path.display().to_string();
     let text = match fs::read_to_string(path) {
@@ -2179,10 +2213,14 @@ fn feature_trials<W: Default + 'static>(
             if let Some(r) = &recorder {
                 r.record_static(&file, &sc.name, "unbound");
             }
+            let ran = Arc::clone(&ran);
             trials.push(
-                Trial::test(title, move || Err(Failed::from(reason)))
-                    .with_kind("unbound")
-                    .with_ignored_flag(true),
+                Trial::test(title, move || {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                    Err(Failed::from(reason))
+                })
+                .with_kind("unbound")
+                .with_ignored_flag(true),
             );
             continue;
         }
@@ -2199,7 +2237,9 @@ fn feature_trials<W: Default + 'static>(
             let r = recorder.clone();
             let file2 = file.clone();
             let scenario_name = sc.name.clone();
+            let ran = Arc::clone(&ran);
             trials.push(Trial::test(title, move || {
+                ran.fetch_add(1, Ordering::Relaxed);
                 if let Some(r) = &r {
                     let _ = r.finish_trial(&file2, &scenario_name, "failed");
                 }
@@ -2217,8 +2257,10 @@ fn feature_trials<W: Default + 'static>(
                 r.record_static(&file, &sc.name, "skipped");
             }
             let reg = Arc::clone(&reg);
+            let ran = Arc::clone(&ran);
             trials.push(
                 Trial::test(title, move || {
+                    ran.fetch_add(1, Ordering::Relaxed);
                     execute_steps(&steps, &reg, W::default())
                         .map(|_| ())
                         .map_err(Failed::from)
@@ -2246,7 +2288,9 @@ fn feature_trials<W: Default + 'static>(
             r.begin_trial();
         }
         let scenario_name = sc.name.clone();
+        let ran = Arc::clone(&ran);
         let mut trial = Trial::test(title, move || {
+            ran.fetch_add(1, Ordering::Relaxed);
             match execute_steps(&steps, &reg, W::default()) {
                 // The stale half of the @todo inversion, checked FIRST: the
                 // run that would silently turn a declared expected-fail
@@ -2293,7 +2337,8 @@ fn feature_trials<W: Default + 'static>(
     trials
 }
 
-type EntryBuilder = Box<dyn FnOnce(&Path, Wip, Option<Arc<ManifestRecorder>>) -> Vec<Trial>>;
+type EntryBuilder =
+    Box<dyn FnOnce(&Path, Wip, Option<Arc<ManifestRecorder>>, Arc<AtomicUsize>) -> Vec<Trial>>;
 
 /// Discover and run every *.feature in a directory, each against its OWN
 /// scoped registry and typed World. Guards registered alongside the scenarios:
@@ -2387,10 +2432,10 @@ impl Features {
         let base_owned = base.to_string();
         self.entries.push((
             base.to_string(),
-            Box::new(move |path, wip, recorder| {
+            Box::new(move |path, wip, recorder, ran| {
                 let mut reg = StepRegistry::new();
                 definer(&mut reg);
-                feature_trials(path, reg, &base_owned, wip, recorder)
+                feature_trials(path, reg, &base_owned, wip, recorder, ran)
             }),
         ));
         self
@@ -2448,9 +2493,32 @@ impl Features {
         self
     }
 
+    /// Set the project's default patience factor: every
+    /// `harness::patience` limit (and so every `harness::wait_for`) is
+    /// `base × this × the machine's ABDD_TIME_SCALE`. Absence windows
+    /// (`harness::absence_window`) do not use it. Process-wide.
+    ///
+    /// Panics unless `factor` is a number from 0.01 to 1000 (the message
+    /// names `patience_default`, the value and the range), and when set a
+    /// second time in one process to a different value (the same value again
+    /// is fine).
+    pub fn patience_default(self, factor: f64) -> Self {
+        harness::set_project_default(factor);
+        self
+    }
+
     /// Build every trial (guards + scenarios) without running them. Public so
     /// the guard behavior itself is testable; normal callers use `run()`.
     pub fn build_trials(self) -> Vec<Trial> {
+        self.build_trials_counting(Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// `build_trials`, with a counter every SCENARIO trial bumps when its body
+    /// runs. The runner's own check trials (the orphan guard, the binding
+    /// guard, the @only / duplicate-title / unused-definition refusals, the
+    /// manifest's) never touch it — which is how `run_with` tells "a scenario
+    /// ran" from "only the runner's checks ran" without parsing a trial name.
+    fn build_trials_counting(self, ran: Arc<AtomicUsize>) -> Vec<Trial> {
         let mut trials = Vec::new();
         let mut files: Vec<PathBuf> = match fs::read_dir(&self.dir) {
             Ok(rd) => rd
@@ -2586,7 +2654,9 @@ impl Features {
                 Wip::No
             };
             match entry_map.remove(base) {
-                Some(builder) => trials.extend(builder(path, wip, recorder.clone())),
+                Some(builder) => {
+                    trials.extend(builder(path, wip, recorder.clone(), Arc::clone(&ran)))
+                }
                 // No definer: run against an empty registry — every scenario is
                 // unbound (ignored) and the binding guard fails unless wip.
                 None => trials.extend(feature_trials::<()>(
@@ -2595,6 +2665,7 @@ impl Features {
                     base,
                     wip,
                     recorder.clone(),
+                    Arc::clone(&ran),
                 )),
             }
         }
@@ -2614,10 +2685,240 @@ impl Features {
 
     /// Run under `cargo test` (in a `harness = false` test target) and exit
     /// with the suite's status.
+    ///
+    /// Two refusals sit around the run, both about selecting trials:
+    ///
+    ///  - a SECOND name filter is refused before any trial runs, naming every
+    ///    filter in the order given, with exit status 2. The harness takes
+    ///    one; left to the argument parser the refusal is a generic usage
+    ///    error that reads as a broken command;
+    ///  - a selection (a name filter, a `--skip`, or both) under which NO
+    ///    SCENARIO ran fails the run with exit status 101, naming what was
+    ///    given (see `run_with`). libtest's own answer to a mistyped filter is
+    ///    `ok. 0 passed` and exit 0 — green, having observed nothing.
+    ///
+    /// The settings are resolved for every project, whether or not it uses
+    /// `harness`. A settings error (`ABDD_TIME_SCALE` not a number from 0.01
+    /// to 1000, an `ABDD_MACHINE_ENV` that is relative or names a file that is
+    /// malformed on an `ABDD_` line or cannot be read) stops any project's run
+    /// before any trial, with exit status 2: like a second filter, the run as
+    /// configured cannot mean anything, and 101 would read as a run that
+    /// happened and failed. Without an error, one line on stderr names the
+    /// patience factor, its two parts and their sources (see `harness`) when
+    /// a project default is set, `ABDD_TIME_SCALE` has a value, or
+    /// `ABDD_MACHINE_ENV` names a file, even one that sets nothing. The run
+    /// prints nothing new only when no project default is set and neither an
+    /// `ABDD_TIME_SCALE` value nor an `ABDD_MACHINE_ENV` is in the environment
+    /// (an empty or blank value counts as unset).
+    ///
+    /// Otherwise the exit status is libtest's: 101 when a trial failed, 0
+    /// when none did.
     pub fn run(self) -> ! {
+        let argv: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(refusal) = second_filter_refusal(&argv) {
+            eprintln!("{refusal}");
+            std::process::exit(2);
+        }
         let args = Arguments::from_args();
-        libtest_mimic::run(&args, self.build_trials()).exit()
+        match harness::run_header() {
+            Err(e) => {
+                eprintln!("gherkin-cargo-test: settings error, no trial ran: {e}");
+                std::process::exit(2);
+            }
+            Ok(Some(header)) => eprintln!("{header}"),
+            Ok(None) => {}
+        }
+        let report = self.run_with(&args);
+        if let Some(note) = &report.note {
+            eprintln!("{note}");
+        }
+        if let Some(refusal) = &report.refusal {
+            eprintln!("{refusal}");
+            // libtest's own exit code for a failed run.
+            std::process::exit(101);
+        }
+        report.conclusion.exit()
     }
+
+    /// Run the trials under `args` and apply the filter guard, without
+    /// exiting. Public so the guard itself is testable; normal callers use
+    /// `run()`.
+    ///
+    /// The guard: when a selection was given — a name filter, at least one
+    /// `--skip`, or both — and no scenario trial's body ran, the run is
+    /// refused, even though every trial that did run passed. The runner's own
+    /// check trials do not count as a run: a filter matching only "step
+    /// definitions are complete" would otherwise be the same vacuous green
+    /// one level up. The filter is matched against the trial's full name,
+    /// kind label included (`[skip] …`, `[unbound] …`). When the selection
+    /// matched only parked scenarios (`@skip`, or unbound) and left them
+    /// parked, the message says so instead.
+    ///
+    /// `--ignored` and `--include-ignored` get no exemption: under them a
+    /// parked scenario's body really runs and counts, so a selection that
+    /// still ran no scenario observed nothing and is refused like any other.
+    ///
+    /// No refusal is set when:
+    ///
+    ///  - `--list` was given: nothing runs, so nothing is claimed green; a
+    ///    selection that lists nothing gets a `note` instead;
+    ///  - a trial failed: the run is already red for a named reason, and
+    ///    "pick another target" would point the wrong way;
+    ///  - cargo-nextest runs the process (its `NEXTEST` or
+    ///    `NEXTEST_EXECUTION_MODE` variable is set) AND the filter is
+    ///    `--exact`, as nextest always passes it: nextest runs every trial in
+    ///    its own process, check trials included, so "this process ran no
+    ///    scenario" is its normal case. A leaked variable under an ordinary
+    ///    substring filter is still refused.
+    ///
+    /// The guard is per test target, because that is all one process can
+    /// see. `cargo test -- "<filter>"` hands the filter to EVERY target, so
+    /// with two runner targets the one that does not hold the scenario is
+    /// refused, and cargo stops there. The message says to name the target.
+    pub fn run_with(self, args: &Arguments) -> RunReport {
+        let dir = self.dir.display().to_string();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let trials = self.build_trials_counting(Arc::clone(&ran));
+        let listed = trials.iter().filter(|t| !args.is_filtered_out(t)).count();
+        let conclusion = libtest_mimic::run(args, trials);
+        let nextest = (std::env::var_os("NEXTEST").is_some()
+            || std::env::var_os("NEXTEST_EXECUTION_MODE").is_some())
+            && args.exact;
+        let mut report = RunReport {
+            conclusion,
+            refusal: None,
+            note: None,
+        };
+        let Some(sel) = Selection::of(args) else {
+            return report;
+        };
+        let what = &sel.subject;
+        if args.list {
+            if listed == 0 {
+                report.note = Some(format!("gherkin-cargo-test: {what} lists nothing in {dir}"));
+            }
+            return report;
+        }
+        if nextest || report.conclusion.num_failed > 0 {
+            return report;
+        }
+        if ran.load(Ordering::Relaxed) == 0 {
+            let parked_left_parked =
+                report.conclusion.num_ignored > 0 && !args.ignored && !args.include_ignored;
+            report.refusal = Some(if parked_left_parked {
+                format!(
+                    "gherkin-cargo-test: {what} matched only ignored scenarios in {dir}; nothing ran"
+                )
+            } else {
+                format!(
+                    "gherkin-cargo-test: {what} ran no scenario in {dir}; {}, pick that target: cargo test --test <target> -- {}",
+                    if args.filter.is_some() {
+                        "if it names a scenario of another test target"
+                    } else {
+                        "if the scenarios it leaves are in another test target"
+                    },
+                    sel.command
+                )
+            });
+        }
+        report
+    }
+}
+
+/// A run's selection as the guard's messages name it.
+struct Selection {
+    /// `the filter "F"`, `the selection --skip "S"`, or
+    /// `the filter "F" with --skip "S"`.
+    subject: String,
+    /// The same selection as harness arguments: `"F" --skip "S"`.
+    command: String,
+}
+
+impl Selection {
+    /// None when neither a name filter nor a `--skip` was given.
+    fn of(args: &Arguments) -> Option<Selection> {
+        let skips = args
+            .skip
+            .iter()
+            .map(|s| format!("--skip \"{s}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match (&args.filter, skips.is_empty()) {
+            (None, true) => None,
+            (Some(f), true) => Some(Selection {
+                subject: format!("the filter \"{f}\""),
+                command: format!("\"{f}\""),
+            }),
+            (None, false) => Some(Selection {
+                subject: format!("the selection {skips}"),
+                command: skips,
+            }),
+            (Some(f), false) => Some(Selection {
+                subject: format!("the filter \"{f}\" with {skips}"),
+                command: format!("\"{f}\" {skips}"),
+            }),
+        }
+    }
+}
+
+/// What `Features::run_with` concluded: libtest-mimic's counts, plus the
+/// filter guard's verdict.
+pub struct RunReport {
+    pub conclusion: Conclusion,
+    /// Set when the run must fail although no trial failed: a selection (a
+    /// name filter, a `--skip`, or both) under which no scenario ran. The
+    /// text names the filter and the skip patterns that were given, and the
+    /// feature directory. Never set when a trial failed, under `--list`, or
+    /// under cargo-nextest with `--exact`.
+    pub refusal: Option<String>,
+    /// Something to say that fails nothing: under `--list`, a selection that
+    /// lists nothing.
+    pub note: Option<String>,
+}
+
+/// The refusal for a second name filter, or None. The harness takes ONE
+/// filter (libtest-mimic's `Arguments.filter`); libtest itself would OR
+/// several. Naming both here, before the argument parser runs, replaces its
+/// generic `unexpected argument` with the fix: one filter per run.
+///
+/// A positional is any argument that is not a flag and not a flag's value,
+/// read the way libtest-mimic 0.8's parser (clap) reads it: a lone `-` is a
+/// positional, and after the first bare `--` EVERY argument is one, so
+/// `-- --list zzz` is two filters. The flags below are the ones libtest-mimic
+/// 0.8 gives a separate value; `--flag=value` is one argument and needs no
+/// entry.
+fn second_filter_refusal(argv: &[String]) -> Option<String> {
+    const TAKES_VALUE: [&str; 6] = [
+        "--skip",
+        "--test-threads",
+        "--logfile",
+        "--color",
+        "--format",
+        "-Z",
+    ];
+    let mut filters: Vec<&str> = Vec::new();
+    let mut args = argv.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            filters.extend(args.by_ref().map(String::as_str));
+        } else if TAKES_VALUE.contains(&arg.as_str()) {
+            args.next();
+        } else if arg == "-" || !arg.starts_with('-') {
+            filters.push(arg);
+        }
+    }
+    if filters.len() < 2 {
+        return None;
+    }
+    let named = filters
+        .iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    Some(format!(
+        "gherkin-cargo-test: {} name filters were given ({named}); a run takes one filter — run them one at a time",
+        filters.len()
+    ))
 }
 
 #[cfg(test)]
@@ -2670,5 +2971,113 @@ mod manifest_unit {
             ),
             Path::new("../../features/counter.feature")
         );
+    }
+}
+
+#[cfg(test)]
+mod second_filter_unit {
+    use super::second_filter_refusal;
+
+    fn refuse(args: &[&str]) -> Option<String> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        second_filter_refusal(&argv)
+    }
+
+    #[test]
+    fn no_args_and_one_filter_are_fine() {
+        assert_eq!(refuse(&[]), None);
+        assert_eq!(refuse(&["Counter"]), None);
+    }
+
+    #[test]
+    fn two_filters_are_named_in_order_in_quotes() {
+        let m = refuse(&["alpha", "beta"]).expect("refused");
+        assert!(m.contains("2 name filters"), "{m}");
+        assert!(m.contains("(\"alpha\" and \"beta\")"), "{m}");
+    }
+
+    #[test]
+    fn three_filters_are_all_named() {
+        let m = refuse(&["a", "b", "c"]).expect("refused");
+        assert!(m.contains("3 name filters"), "{m}");
+        assert!(m.contains("\"a\" and \"b\" and \"c\""), "{m}");
+    }
+
+    #[test]
+    fn values_of_separate_value_flags_are_not_filters() {
+        for flags in [
+            ["--skip", "x"],
+            ["--test-threads", "4"],
+            ["--color", "always"],
+            ["--format", "pretty"],
+            ["--logfile", "f"],
+            ["-Z", "unstable-options"],
+        ] {
+            assert_eq!(refuse(&[flags[0], flags[1], "Counter"]), None, "{flags:?}");
+            assert_eq!(refuse(&["Counter", flags[0], flags[1]]), None, "{flags:?}");
+            // ...but a real second filter beside them still counts.
+            let m = refuse(&["one", flags[0], flags[1], "two"]).expect("refused");
+            assert!(m.contains("\"one\" and \"two\""), "{flags:?}: {m}");
+        }
+    }
+
+    #[test]
+    fn equals_forms_are_one_argument() {
+        assert_eq!(
+            refuse(&["--skip=x", "--test-threads=4", "--color=never", "Counter"]),
+            None
+        );
+        // `--skip=x` takes no separate value, so both words after it are
+        // filters.
+        let m = refuse(&["--skip=x", "one", "two"]).expect("refused");
+        assert!(m.contains("(\"one\" and \"two\")"), "{m}");
+    }
+
+    #[test]
+    fn filters_are_named_in_the_order_given() {
+        let m = refuse(&["beta", "alpha"]).expect("refused");
+        assert!(m.contains("(\"beta\" and \"alpha\")"), "{m}");
+    }
+
+    #[test]
+    fn after_a_bare_double_dash_every_argument_is_a_filter() {
+        // clap's reading: `-- --list zzz` is two positionals.
+        let m = refuse(&["--", "--list", "zzz"]).expect("refused");
+        assert!(m.contains("2 name filters"), "{m}");
+        assert!(m.contains("(\"--list\" and \"zzz\")"), "{m}");
+        let m = refuse(&["Counter", "--", "--skip", "x"]).expect("refused");
+        assert!(m.contains("\"Counter\" and \"--skip\" and \"x\""), "{m}");
+        // One positional after `--` is one filter, and `--` itself is none.
+        assert_eq!(refuse(&["--exact", "--", "--list"]), None);
+        assert_eq!(refuse(&["Counter", "--"]), None);
+    }
+
+    #[test]
+    fn a_lone_dash_is_a_filter() {
+        let m = refuse(&["-", "x"]).expect("refused");
+        assert!(m.contains("(\"-\" and \"x\")"), "{m}");
+    }
+
+    #[test]
+    fn boolean_flags_are_not_filters() {
+        assert_eq!(
+            refuse(&[
+                "--exact",
+                "--nocapture",
+                "--include-ignored",
+                "--ignored",
+                "--list",
+                "-q",
+                "Counter"
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_filter_with_spaces_is_one_filter() {
+        assert_eq!(refuse(&["Counter :: increment once"]), None);
+        let m = refuse(&["Counter :: a b", "other one"]).expect("refused");
+        assert!(m.contains("\"Counter :: a b\" and \"other one\""), "{m}");
     }
 }
